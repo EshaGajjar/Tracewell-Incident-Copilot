@@ -1,0 +1,272 @@
+[
+  {
+    "id": "inc_01",
+    "service": "payment-api",
+    "category": "config_error",
+    "severity": "SEV2",
+    "symptom": "/pay returns 500 right after deploy",
+    "cause": "DATABASE_URL set to a malformed value in the new revision",
+    "fix": "Rolled back to previous revision; fixed the secret reference"
+  },
+  {
+    "id": "inc_02",
+    "service": "payment-api",
+    "category": "config_error",
+    "severity": "SEV2",
+    "symptom": "All payments failing, log says 'DATABASE_URL invalid'",
+    "cause": "Typo in database hostname in env var",
+    "fix": "Rolled back traffic to the last good revision"
+  },
+  {
+    "id": "inc_03",
+    "service": "payment-api",
+    "category": "dependency_failure",
+    "severity": "SEV3",
+    "symptom": "/pay latency over 5 seconds, Redis connection refused errors",
+    "cause": "REDIS_URL pointed to a wrong port",
+    "fix": "Corrected REDIS_URL and redeployed; interim rollback"
+  },
+  {
+    "id": "inc_04",
+    "service": "payment-api",
+    "category": "config_error",
+    "severity": "SEV2",
+    "symptom": "Revision fails to start, KeyError DATABASE_URL",
+    "cause": "Required env var dropped during a config refactor",
+    "fix": "Rolled back; restored the variable"
+  },
+  {
+    "id": "inc_05",
+    "service": "payment-api",
+    "category": "permissions",
+    "severity": "SEV2",
+    "symptom": "500 errors reading payment-db-url, permission denied on secret",
+    "cause": "Service account missing secretAccessor role",
+    "fix": "Granted roles/secretmanager.secretAccessor"
+  },
+  {
+    "id": "inc_06",
+    "service": "payment-api",
+    "category": "bad_deployment",
+    "severity": "SEV2",
+    "symptom": "Error rate jumped from 0.1% to 40% after release",
+    "cause": "Code change introduced a null pointer in /pay",
+    "fix": "Rolled back to the previous revision"
+  },
+  {
+    "id": "inc_07",
+    "service": "payment-api",
+    "category": "resource_exhaustion",
+    "severity": "SEV2",
+    "symptom": "Intermittent 503s under load",
+    "cause": "Max instances set too low, concurrency exhausted",
+    "fix": "Raised max instances and concurrency"
+  },
+  {
+    "id": "inc_08",
+    "service": "payment-api",
+    "category": "dependency_failure",
+    "severity": "SEV1",
+    "symptom": "All /pay calls timing out",
+    "cause": "Database ran out of connections",
+    "fix": "Restarted pool, raised connection limit, added pool timeout"
+  },
+  {
+    "id": "inc_09",
+    "service": "payment-api",
+    "category": "latency",
+    "severity": "SEV3",
+    "symptom": "p95 latency doubled with no errors",
+    "cause": "Redis eviction due to small memory",
+    "fix": "Increased Redis memory size"
+  },
+  {
+    "id": "inc_10",
+    "service": "payment-api",
+    "category": "data",
+    "severity": "SEV3",
+    "symptom": "Duplicate charges for some retries",
+    "cause": "Idempotency keys lost when Redis restarted",
+    "fix": "Added database fallback for idempotency"
+  },
+  {
+    "id": "inc_11",
+    "service": "auth-service",
+    "category": "permissions",
+    "severity": "SEV1",
+    "symptom": "401 on all internal APIs",
+    "cause": "Signing key secret version disabled",
+    "fix": "Re-enabled previous secret version"
+  },
+  {
+    "id": "inc_12",
+    "service": "auth-service",
+    "category": "bad_deployment",
+    "severity": "SEV2",
+    "symptom": "Token validation errors after release",
+    "cause": "New revision used a different issuer value",
+    "fix": "Rolled back; fixed issuer config"
+  },
+  {
+    "id": "inc_13",
+    "service": "auth-service",
+    "category": "latency",
+    "severity": "SEV3",
+    "symptom": "Login slow at peak hours",
+    "cause": "Cold starts with min instances at zero",
+    "fix": "Set min instances to 2"
+  },
+  {
+    "id": "inc_14",
+    "service": "auth-service",
+    "category": "dependency_failure",
+    "severity": "SEV2",
+    "symptom": "Intermittent 503 from token endpoint",
+    "cause": "Key fetch from Secret Manager rate limited",
+    "fix": "Cached the key in memory for 5 minutes"
+  },
+  {
+    "id": "inc_15",
+    "service": "auth-service",
+    "category": "config_error",
+    "severity": "SEV2",
+    "symptom": "Users logged out unexpectedly",
+    "cause": "Token expiry set to 5 minutes instead of 60",
+    "fix": "Corrected expiry setting"
+  },
+  {
+    "id": "inc_16",
+    "service": "order-service",
+    "category": "dependency_failure",
+    "severity": "SEV2",
+    "symptom": "Order creation timeouts",
+    "cause": "payment-api outage",
+    "fix": "Resolved payment-api incident; added retry with backoff"
+  },
+  {
+    "id": "inc_17",
+    "service": "order-service",
+    "category": "bad_deployment",
+    "severity": "SEV2",
+    "symptom": "Orders stuck in pending after deploy",
+    "cause": "New revision pointed to the wrong queue name",
+    "fix": "Rolled back and fixed the queue name"
+  },
+  {
+    "id": "inc_18",
+    "service": "order-service",
+    "category": "resource_exhaustion",
+    "severity": "SEV3",
+    "symptom": "Memory limit exceeded, instances restarting",
+    "cause": "Large response cached without a size cap",
+    "fix": "Added cache size limit; raised memory"
+  },
+  {
+    "id": "inc_19",
+    "service": "order-service",
+    "category": "config_error",
+    "severity": "SEV2",
+    "symptom": "Container failed to start, missing PAYMENT_API_URL",
+    "cause": "Env var missing in the new revision",
+    "fix": "Added the variable and redeployed"
+  },
+  {
+    "id": "inc_20",
+    "service": "order-service",
+    "category": "data",
+    "severity": "SEV3",
+    "symptom": "Totals incorrect on some orders",
+    "cause": "Rounding change in new pricing code",
+    "fix": "Reverted the pricing change"
+  },
+  {
+    "id": "inc_21",
+    "service": "notification-service",
+    "category": "dependency_failure",
+    "severity": "SEV3",
+    "symptom": "Emails delayed, 429 from provider",
+    "cause": "Provider rate limit exceeded after a bulk send",
+    "fix": "Added throttling and queue"
+  },
+  {
+    "id": "inc_22",
+    "service": "notification-service",
+    "category": "config_error",
+    "severity": "SEV3",
+    "symptom": "No push notifications sent",
+    "cause": "API key env var empty in the new revision",
+    "fix": "Restored the key from Secret Manager"
+  },
+  {
+    "id": "inc_23",
+    "service": "notification-service",
+    "category": "bad_deployment",
+    "severity": "SEV3",
+    "symptom": "Duplicate emails after release",
+    "cause": "Retry logic double-sent messages",
+    "fix": "Rolled back and fixed dedupe logic"
+  },
+  {
+    "id": "inc_24",
+    "service": "notification-service",
+    "category": "permissions",
+    "severity": "SEV3",
+    "symptom": "Send failures with 403 from provider",
+    "cause": "API key revoked by provider",
+    "fix": "Issued a new API key"
+  },
+  {
+    "id": "inc_25",
+    "service": "notification-service",
+    "category": "resource_exhaustion",
+    "severity": "SEV3",
+    "symptom": "Worker crashes under large batches",
+    "cause": "Batch loaded fully into memory",
+    "fix": "Process in chunks of 500"
+  },
+  {
+    "id": "inc_26",
+    "service": "redis",
+    "category": "dependency_failure",
+    "severity": "SEV2",
+    "symptom": "Services report Redis timeouts",
+    "cause": "Redis instance failed over and clients kept old IP",
+    "fix": "Restarted clients; enabled reconnect on failover"
+  },
+  {
+    "id": "inc_27",
+    "service": "redis",
+    "category": "resource_exhaustion",
+    "severity": "SEV3",
+    "symptom": "Cache hit rate dropped, eviction count rising",
+    "cause": "Instance memory full",
+    "fix": "Resized the instance and set TTLs"
+  },
+  {
+    "id": "inc_28",
+    "service": "firestore",
+    "category": "permissions",
+    "severity": "SEV2",
+    "symptom": "PermissionDenied writing incident data",
+    "cause": "Runtime service account missing roles/datastore.user",
+    "fix": "Granted the role"
+  },
+  {
+    "id": "inc_29",
+    "service": "cloud-run",
+    "category": "bad_deployment",
+    "severity": "SEV2",
+    "symptom": "New revision healthy but received no traffic",
+    "cause": "Traffic pinned to an old revision",
+    "fix": "Updated traffic to the latest revision"
+  },
+  {
+    "id": "inc_30",
+    "service": "cloud-run",
+    "category": "config_error",
+    "severity": "SEV2",
+    "symptom": "Revision never ready, container fails to listen on PORT",
+    "cause": "App hardcoded port 5000 instead of reading PORT",
+    "fix": "Read PORT from the environment"
+  }
+]

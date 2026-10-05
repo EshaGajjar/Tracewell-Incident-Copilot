@@ -1,0 +1,8 @@
+// DEMO ONLY: open access so the prototype works without auth. Tighten before real use.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /incidents/{id=**} { allow read, write: if true; }
+    match /{document=**} { allow read: if false; }
+  }
+}

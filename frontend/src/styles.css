@@ -1,0 +1,27 @@
+:root { --bg:#f6f7f9; --fg:#1b1f24; --muted:#6b7280; --card:#fff; --accent:#2563eb; --line:#e5e7eb; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --fg:#e8eaed; --muted:#9aa0a6; --card:#181b21; --line:#2a2f37; } }
+* { box-sizing: border-box; }
+body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+.app { max-width: 880px; margin: 0 auto; padding: 16px; }
+header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+header h1 { margin:0; cursor:pointer; }
+button { background:var(--accent); color:#fff; border:0; padding:8px 14px; border-radius:6px; cursor:pointer; }
+button.secondary { background:transparent; color:var(--fg); border:1px solid var(--line); }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:12px; }
+.card label { display:block; margin-bottom:10px; }
+input, textarea { display:block; width:100%; padding:8px; margin-top:4px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+.quick { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+.quick button { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+.list { list-style:none; padding:0; }
+.list li { display:flex; gap:10px; align-items:center; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 14px; margin-bottom:8px; cursor:pointer; }
+.list li strong { flex:1; }
+.muted { color:var(--muted); }
+.error { color:#dc2626; }
+.status, .sev, .strength { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); }
+.status.resolved, .strength.Confirmed { color:#16a34a; }
+.status.awaiting_approval, .strength.Probable { color:#d97706; }
+.strength.Possible { color:var(--muted); }
+.timeline { padding-left:18px; } pre { white-space:pre-wrap; overflow-x:auto; font-size:12px; }
+select { display:block; width:100%; padding:8px; margin-top:4px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+.shots { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; } .shots img { height:90px; border-radius:6px; border:1px solid var(--line); }
+.status.open, .status.investigating { color:var(--accent); } .status.closed { color:#16a34a; }

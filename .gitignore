@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.local
+__pycache__/
+.venv/
+service-account*.json
+.firebase/

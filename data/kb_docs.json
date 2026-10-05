@@ -1,0 +1,142 @@
+[
+  {
+    "id": "doc_01",
+    "title": "Payment API Architecture & Service Overview",
+    "type": "service",
+    "service": "payment-api",
+    "content": "The payment-api microservice is a Python Flask application deployed on Google Cloud Run that exposes the /health and /pay endpoints. The /health endpoint performs basic liveness checks without external dependency calls, whereas /pay executes credit card authorization and requires an active PostgreSQL connection. Traffic routes through Google Cloud Load Balancing with an autoscaling ceiling of 100 container instances. Service-to-service calls from order-service to payment-api authenticate via Google Cloud IAM OIDC tokens."
+  },
+  {
+    "id": "doc_02",
+    "title": "DATABASE_URL Configuration Specification",
+    "type": "config",
+    "service": "payment-api",
+    "content": "The payment-api container requires the environment variable DATABASE_URL formatted strictly as postgresql://USER:PASS@HOST:5432/DBNAME. Values must be mounted as secrets from Google Secret Manager using Secret Version references rather than plain text env vars. If the connection string syntax is malformed or the target host is unreachable, the /pay endpoint immediately returns HTTP 500 and emits the log entry 'DATABASE_URL invalid'. Always verify the secret payload using 'gcloud secrets versions access latest --secret=payment-db-url' before updating revisions."
+  },
+  {
+    "id": "doc_03",
+    "title": "REDIS_URL Caching Configuration & Fallback",
+    "type": "config",
+    "service": "payment-api",
+    "content": "Caching and rate-limiting rely on the optional environment variable REDIS_URL formatted as redis://HOST:6379. When an incorrect port or hostname is specified, worker threads fail to connect, logging 'Redis connection refused' on every incoming request. Although payment execution falls back to un-cached database queries, request latency degrades from a baseline p95 of 80ms to over 2500ms under load. Set REDIS_URL via 'gcloud run services update payment-api --update-env-vars REDIS_URL=redis://10.0.0.15:6379' targeting the VPC connector subnet."
+  },
+  {
+    "id": "doc_04",
+    "title": "Emergency Cloud Run Revision Rollback SOP",
+    "type": "sop",
+    "service": "all",
+    "content": "When a faulty revision causes elevated error rates, execute an immediate traffic cutover to the last known stable revision. Identify the target healthy revision using 'gcloud run revisions list --service=payment-api --region=us-central1' to inspect recent deployments. Shift 100% of user traffic by executing 'gcloud run services update-traffic payment-api --to-revisions=payment-api-00042-xyz=100 --region=us-central1'. Confirm complete traffic routing within 10 seconds via 'gcloud run services describe payment-api --region=us-central1 --format=\"yaml(status.traffic)\"'."
+  },
+  {
+    "id": "doc_05",
+    "title": "Production Deployment Safety Checklist",
+    "type": "sop",
+    "service": "all",
+    "content": "Before deploying new container images to Cloud Run, engineers must verify that all required Secret Manager bindings exist in the production GCP project. Run the staging smoke tests and review CI artifact digest pinning with 'cosign verify --key env://COSIGN_PUB gcr.io/corp/payment-api:v1.4.2'. Deploy initially with zero direct traffic using 'gcloud run deploy payment-api --image=gcr.io/corp/payment-api:v1.4.2 --no-traffic --region=us-central1'. Send targeted smoke requests to the revision URL before routing production users with a 10% canary split for 5 minutes."
+  },
+  {
+    "id": "doc_06",
+    "title": "Troubleshooting Post-Deployment HTTP 500 Errors",
+    "type": "troubleshooting",
+    "service": "payment-api",
+    "content": "If alert 'High-5xx-Rate' triggers after a deploy, test the service endpoints independently using 'curl -i https://payment-api-run.internal/health' and evaluate response payloads. If /health returns HTTP 200 but /pay returns HTTP 500, check logs for 'DATABASE_URL invalid' indicating a bad database credential or connection string. Inspect live stderr streams using 'gcloud logging read \"resource.type=cloud_run_revision AND severity>=ERROR\" --limit=20'. If 5xx rates exceed 2% over a 3-minute evaluation window, initiate an immediate rollback to the previous revision."
+  },
+  {
+    "id": "doc_07",
+    "title": "Troubleshooting Container Startup Failures and Missing Env Vars",
+    "type": "troubleshooting",
+    "service": "all",
+    "content": "When Cloud Run instances fail container startup readiness checks, the service logs exit code 1 or terminates with 'Container failed to start. Container failed to start and listen on the port defined by the PORT environment variable'. Verify that mandatory variables like DATABASE_URL are set using 'gcloud run services describe payment-api --format=\"yaml(spec.template.spec.containers[0].env)\"'. Inspect container crash logs with 'gcloud beta run services logs tail payment-api --region=us-central1'. Common culprits include IAM permission denial on Secret Manager secrets or syntax exceptions thrown during Flask app initialization."
+  },
+  {
+    "id": "doc_08",
+    "title": "Incident Severity Classification (SEV1 to SEV4)",
+    "type": "policy",
+    "service": "all",
+    "content": "SEV1 defines critical platform outages where core payment processing or user authentication is fully halted (error rate >5% globally), requiring response within 5 minutes. SEV2 designates major business degradation such as severe latency degradation (>3000ms p95 on /pay) or partial regional disruption, requiring response within 15 minutes. SEV3 represents minor customer impact where workarounds exist or non-critical background jobs in notification-service fail, requiring response within 60 minutes. SEV4 covers minor internal bugs, telemetry failures, or non-impacting configuration drift, addressed during standard business hours."
+  },
+  {
+    "id": "doc_09",
+    "title": "Cloud Logging Query Reference for Microservices",
+    "type": "reference",
+    "service": "all",
+    "content": "Use Cloud Logging filters to isolate failures across Cloud Run microservices during active triage. To query database authentication errors in payment-api, filter with: resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"payment-api\" AND textPayload=\"DATABASE_URL invalid\". To detect caching bottlenecks, run: resource.labels.service_name=\"payment-api\" AND textPayload=\"Redis connection refused\". For broad cross-service HTTP failures, execute: resource.type=\"cloud_run_revision\" AND httpRequest.status>=500 timestamp >= \"2026-10-05T21:00:00Z\"."
+  },
+  {
+    "id": "doc_10",
+    "title": "On-Call Incident Escalation Protocol",
+    "type": "policy",
+    "service": "all",
+    "content": "The primary on-call engineer must acknowledge PagerDuty notifications within 5 minutes for SEV1 incidents and 15 minutes for SEV2 incidents. If the primary does not acknowledge within 10 minutes, PagerDuty automatically triggers secondary on-call and alerts the Engineering Director via SMS and voice call. The incident commander must declare a dedicated Slack incident channel (#inc-YYYYMMDD-payment) and post status updates every 15 minutes for SEV1s. If an infrastructure dependency like Google Cloud or external PSP fails, immediately escalate to the Platform Cloud Operations team."
+  },
+  {
+    "id": "doc_11",
+    "title": "Auth Service Architecture & JWT Validation Overview",
+    "type": "service",
+    "service": "auth-service",
+    "content": "The auth-service is a Node.js microservice deployed on Cloud Run responsible for OAuth2 user logins, session token issuance, and RSA public key rotation. Downstream services like order-service and payment-api validate JWT signatures against the auth-service JWKS endpoint at /.well-known/jwks.json. Session tokens are cached in Redis with a 3600-second TTL to avoid redundant token lookups. If auth-service drops below two running container instances during peak load, authentication error rates spike rapidly across all ingress gateways."
+  },
+  {
+    "id": "doc_12",
+    "title": "Order Service Architecture & Transaction Lifecycle",
+    "type": "service",
+    "service": "order-service",
+    "content": "The order-service manages the complete checkout and order state lifecycle, executing synchronous HTTP calls to payment-api and persisting order records in Firestore. Incoming requests must carry a valid Bearer JWT header, which the service validates before dispatching charge requests to payment-api /pay. Upon receiving an HTTP 200 from payment-api, order-service transitions the order document state from 'PENDING' to 'CONFIRMED' in Firestore. If payment-api returns an HTTP 500 or times out after 4000ms, order-service marks the order as 'FAILED' and queues a retry event."
+  },
+  {
+    "id": "doc_13",
+    "title": "Notification Service Architecture & Asynchronous Event Processing",
+    "type": "service",
+    "service": "notification-service",
+    "content": "The notification-service is a Go-based Cloud Run service triggered by Pub/Sub push subscriptions to deliver customer emails, SMS alerts, and mobile push notifications. When order-service confirms a purchase, a Cloud Pub/Sub message routes directly to the notification-service /push/order-confirmation endpoint. The service connects to Firestore to fetch user communication preferences and deduplicate events using idempotent idempotency_key identifiers. In the event of delivery vendor rate limits (HTTP 429), messages are returned with a non-2xx status to leverage Pub/Sub exponential dead-letter retry policies."
+  },
+  {
+    "id": "doc_14",
+    "title": "Redis Diagnostic & Connection Troubleshooting",
+    "type": "troubleshooting",
+    "service": "all",
+    "content": "When services log 'Redis connection refused' or 'WRONGPASS invalid username-password pair', verify Cloud Run VPC egress settings and Redis Memorystore connectivity. Ensure the Cloud Run revision connects to the proper Serverless VPC Access connector using 'gcloud run services describe payment-api --format=\"value(spec.template.metadata.annotations[\\\"run.googleapis.com/vpc-access-connector\\\"])\"'. Check Redis health and memory exhaustion from a jumpbox using 'redis-cli -h 10.0.0.15 -p 6379 ping' and 'redis-cli -h 10.0.0.15 -p 6379 info memory'. If used_memory exceeds 90% of maxmemory, execute cache eviction or scale the Memorystore instance tier."
+  },
+  {
+    "id": "doc_15",
+    "title": "Firestore IAM Permission & Access Troubleshooting",
+    "type": "troubleshooting",
+    "service": "all",
+    "content": "Services interacting with Firestore will fail with '7 PERMISSION_DENIED: Missing or insufficient permissions' if their runtime Cloud Run service account lacks IAM privileges. Confirm the runtime identity assigned to the service by running 'gcloud run services describe order-service --format=\"value(spec.template.spec.serviceAccountName)\"'. Grant the Datastore User role to the service account using 'gcloud projects add-iam-policy-binding corp-prod-app --member=\"serviceAccount:order-sa@corp-prod-app.iam.gserviceaccount.com\" --role=\"roles/datastore.user\"'. If permissions were altered recently, allow up to 120 seconds for IAM propagation across regional GCP caches."
+  },
+  {
+    "id": "doc_16",
+    "title": "Secret Manager IAM Access Troubleshooting",
+    "type": "troubleshooting",
+    "service": "all",
+    "content": "When a container deployment crashes with 'PermissionDenied: 403 The caller does not have permission to access secret version', verify that Secret Manager access is explicitly granted. The Cloud Run service account must hold the Secret Manager Secret Accessor role on each referenced secret. Fix access using 'gcloud secrets add-iam-policy-binding payment-db-url --member=\"serviceAccount:payment-sa@corp-prod-app.iam.gserviceaccount.com\" --role=\"roles/secretmanager.secretAccessor\"'. Deploy a new revision or force a replacement instance using 'gcloud run services update payment-api --update-labels=redeploy=true' to trigger re-fetching of secrets."
+  },
+  {
+    "id": "doc_17",
+    "title": "Investigating High Latency Across Cloud Run Services",
+    "type": "troubleshooting",
+    "service": "all",
+    "content": "When p95 request latency exceeds the 1000ms threshold, inspect Cloud Run container instance counts and CPU throttling metrics in Cloud Monitoring. Run 'gcloud run services describe payment-api --format=\"yaml(spec.template.spec.containerConcurrency)\"' to verify the concurrency limit is not saturating available worker threads. Look for cold starts in Cloud Logging by running 'resource.type=\"cloud_run_revision\" AND textPayload=~\"Starting container process\"' during the latency spike period. If high latency correlates with slow backend responses, check downstream Redis ping latency and PostgreSQL active locks in pg_stat_activity."
+  },
+  {
+    "id": "doc_18",
+    "title": "Canary Release Deployment & Verification SOP",
+    "type": "sop",
+    "service": "all",
+    "content": "Canary releases must route a controlled percentage of live production traffic to validate new image revisions before full rollout. Deploy the new revision without traffic using 'gcloud run deploy payment-api --image=gcr.io/corp/payment-api:v1.4.3 --no-traffic --region=us-central1'. Direct 10% of traffic to the new revision by running 'gcloud run services update-traffic payment-api --to-revisions=payment-api-00043-abc=10,payment-api-00042-xyz=90 --region=us-central1'. Monitor error rates and p95 latency for 15 minutes; if error rates stay below 0.1%, shift 100% of traffic to the new revision."
+  },
+  {
+    "id": "doc_19",
+    "title": "Post-Incident Review (PIR) Standard Operating Procedure",
+    "type": "sop",
+    "service": "all",
+    "content": "A blameless Post-Incident Review must be initiated within 48 hours of resolving any SEV1 or SEV2 incident. The incident commander must schedule a 45-minute retrospective meeting with engineering stakeholders and complete the PIR template covering root cause, detection time, and impact metrics. Identify the primary contributing factor using the 5 Whys methodology, avoiding personal attribution. All preventive action items must be converted into Jira tickets with assignees and completed within 14 business days for SEV1s or 30 days for SEV2s."
+  },
+  {
+    "id": "doc_20",
+    "title": "Incident Communication & Stakeholder Notification SOP",
+    "type": "sop",
+    "service": "all",
+    "content": "During any SEV1 or SEV2 outage, the incident communications lead must publish a status update to the internal #incidents-announcements Slack channel within 15 minutes of declaration. Updates must follow the standard structure: Current Impact, Work in Progress, and Next Update Time (cadence of 20 minutes for SEV1, 45 minutes for SEV2). If external customers are affected, update status.corp.com using the Statuspage CLI or console within 30 minutes with an 'Investigating' or 'Identified' incident state. Never communicate speculative root causes externally until verified by the Incident Commander and technical leads."
+  }
+]

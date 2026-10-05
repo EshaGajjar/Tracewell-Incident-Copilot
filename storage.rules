@@ -1,0 +1,10 @@
+// DEMO ONLY: anyone can upload images under 5 MB to incidents/. Tighten before real use.
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /incidents/{id}/attachments/{file} {
+      allow read: if true;
+      allow write: if request.resource.size < 5 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
+    }
+  }
+}
