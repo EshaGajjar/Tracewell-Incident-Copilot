@@ -54,14 +54,7 @@ export default function IncidentDetail({ id }) {
         </section>
       )}
 
-      {pending && pending.status === "pending" && (
-        <section className="card">
-          <h3>Recommended action</h3>
-          <p><code>{pending.action}</code> — {pending.reason}</p>
-          <button onClick={() => api("/approve", { incident_id: id })}>Approve</button>{" "}
-          <button className="secondary" onClick={() => api("/reject", { incident_id: id })}>Reject</button>
-        </section>
-      )}
+      {pending && <ActionPanel id={id} pending={pending} />}
 
       {inc.verification && (
         <section className="card"><h3>Verification</h3>
@@ -100,6 +93,31 @@ function CloseForm({ id }) {
       <label>Root cause<textarea rows={2} value={rc} onChange={(e) => setRc(e.target.value)} /></label>
       <label>Resolution<textarea rows={3} value={fix} onChange={(e) => setFix(e.target.value)} /></label>
       <button disabled={busy} onClick={close}>{busy ? "Closing…" : "Close with resolution"}</button>
+      {error && <p className="error">{error}</p>}
+    </section>
+  );
+}
+
+function ActionPanel({ id, pending }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function decide(path) {
+    setBusy(true); setError("");
+    try { await api(path, { incident_id: id }); }
+    catch (e) { setError(e.message); } finally { setBusy(false); }
+  }
+  return (
+    <section className="card">
+      <h3>Recommended action</h3>
+      <p><code>{pending.action}</code> — {pending.reason}</p>
+      {pending.status === "pending" ? (
+        <>
+          <button disabled={busy} onClick={() => decide("/approve")}>{busy ? "Working…" : "Approve"}</button>{" "}
+          <button disabled={busy} className="secondary" onClick={() => decide("/reject")}>Reject</button>
+        </>
+      ) : (
+        <p className="muted">Decision: {pending.status}</p>
+      )}
       {error && <p className="error">{error}</p>}
     </section>
   );

@@ -1,8 +1,19 @@
-// DEMO ONLY: open access so the prototype works without auth. Tighten before real use.
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /incidents/{id=**} { allow read, write: if true; }
-    match /{document=**} { allow read: if false; }
+    match /incidents/{id} {
+      allow read: if true;
+      // Browser may only create a plain human ticket (no diagnosis, steps, status changes).
+      allow create: if request.resource.data.source == 'human'
+        && request.resource.data.status == 'open'
+        && request.resource.data.keys().hasOnly(
+             ['title','service','severity','description','source','status','attachments','created_at']);
+      // ...and may only attach screenshots afterwards.
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attachments']);
+      allow delete: if false;
+      // Everything else (status, diagnosis, steps, approvals, closing) is written by the backend (Admin SDK bypasses rules).
+      match /steps/{stepId} { allow read: if true; allow write: if false; }
+    }
+    match /{document=**} { allow read, write: if false; }
   }
 }

@@ -31,3 +31,10 @@ Deploy: set the project id in `.firebaserc`, then `cd frontend && npm run build 
 ## Ticket system
 The dashboard works like a small ticketing tool: create a ticket with screenshots, optionally have the Copilot investigate, then close it with root cause and resolution. Closed tickets feed `past_incidents` through the backend `/close` endpoint (Teammate A). See `docs/schema.md`.
 Enable Firebase Storage in the console, then `firebase deploy --only firestore:rules,storage,hosting`.
+
+## Day 3-5 additions
+- `scripts/seed_incidents.py` seeds 3 sample incidents (resolved, awaiting approval, open ticket)
+- `scripts/retrieval_check.py` runs 10 doc searches and 4 incident searches to check retrieval quality
+- `scripts/deploy_frontend.ps1` builds and deploys hosting and rules (Windows PowerShell)
+- `firestore.rules` lets the browser create plain tickets and add screenshots only; everything else is written by the backend
+- `docs/architecture.md`, `docs/deck-slides-1-4.md` for the deck
