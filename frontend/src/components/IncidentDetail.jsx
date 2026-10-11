@@ -1,19 +1,30 @@
 import { useEffect, useState } from "react";
-import { collection, doc, onSnapshot, orderBy, query } from "firebase/firestore";
-import { db, api } from "../firebase.js";
+import { api, request } from "../firebase.js";
 
 export default function IncidentDetail({ id }) {
   const [inc, setInc] = useState(null);
   const [steps, setSteps] = useState([]);
 
   useEffect(() => {
-    const u1 = onSnapshot(doc(db, "incidents", id), (d) => setInc({ id: d.id, ...d.data() }));
-    const q = query(collection(db, "incidents", id, "steps"), orderBy("index"));
-    const u2 = onSnapshot(q, (s) => setSteps(s.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    return () => { u1(); u2(); };
+    let active = true;
+    async function load() {
+      try {
+        const [incident, timeline] = await Promise.all([
+          request(`/incidents/${encodeURIComponent(id)}`),
+          request(`/incidents/${encodeURIComponent(id)}/steps`),
+        ]);
+        if (active) { setInc(incident); setSteps(timeline); }
+      } catch (e) {
+        if (active) setInc((current) => current || { id, title: "Could not load incident", description: e.message, status: "error" });
+      }
+    }
+    load();
+    const timer = setInterval(load, 2500);
+    return () => { active = false; clearInterval(timer); };
   }, [id]);
 
   if (!inc) return <p className="muted">Loading…</p>;
+  if (inc.status === "error") return <p className="error" role="alert">{inc.description}</p>;
   const diag = inc.diagnosis, pending = inc.pending_action;
   const closed = inc.status === "resolved" || inc.status === "closed";
 

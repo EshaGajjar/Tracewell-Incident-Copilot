@@ -6,3 +6,11 @@ __pycache__/
 .venv/
 service-account*.json
 .firebase/
+backend/.env
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+backend/tracewell_local.sqlite3
+backend/tracewell_local.sqlite3-shm
+backend/tracewell_local.sqlite3-wal
