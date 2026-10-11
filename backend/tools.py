@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import os
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 import requests
 from .config import GCP_PROJECT, GCP_REGION, LOG_LOOKBACK_MINUTES
 from .retrieval import search_knowledge, search_past_incidents
@@ -109,7 +109,7 @@ def build_tools(incident_id: str) -> list[Callable]:
 
     def submit_diagnosis(root_cause: str, category: str, severity: str, evidence: list[dict],
                          evidence_strength: str, recommended_action: str = "", target_revision: str = "",
-                         unknowns: list[str] | None = None) -> dict:
+                         unknowns: Optional[list[str]] = None) -> dict:
         """Persist the structured diagnosis. Evidence strength must be Confirmed, Probable, or Possible."""
         from .store import save_diagnosis, update_incident
         allowed = {"Confirmed", "Probable", "Possible"}
