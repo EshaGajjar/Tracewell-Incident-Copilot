@@ -1,27 +1,33 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, request } from "../firebase.js";
 
 export default function IncidentDetail({ id }) {
   const [inc, setInc] = useState(null);
   const [steps, setSteps] = useState([]);
 
-  useEffect(() => {
-    let active = true;
-    async function load() {
-      try {
-        const [incident, timeline] = await Promise.all([
-          request(`/incidents/${encodeURIComponent(id)}`),
-          request(`/incidents/${encodeURIComponent(id)}/steps`),
-        ]);
-        if (active) { setInc(incident); setSteps(timeline); }
-      } catch (e) {
-        if (active) setInc((current) => current || { id, title: "Could not load incident", description: e.message, status: "error" });
-      }
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Fetch once when opening the detail page. Use the Refresh button for updates
+  // instead of polling the API every 2.5 seconds.
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const [incident, timeline] = await Promise.all([
+        request(`/incidents/${encodeURIComponent(id)}`),
+        request(`/incidents/${encodeURIComponent(id)}/steps`),
+      ]);
+      setInc(incident);
+      setSteps(Array.isArray(timeline) ? timeline : []);
+    } catch (e) {
+      setInc((current) => current || { id, title: "Could not load incident", description: e.message, status: "error" });
+    } finally {
+      setRefreshing(false);
     }
-    load();
-    const timer = setInterval(load, 2500);
-    return () => { active = false; clearInterval(timer); };
   }, [id]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   if (!inc) return <p className="muted">Loading…</p>;
   if (inc.status === "error") return <p className="error" role="alert">{inc.description}</p>;
@@ -30,7 +36,12 @@ export default function IncidentDetail({ id }) {
 
   return (
     <div className="detail">
-      <h2>{inc.title} <span className={`status ${inc.status}`}>{inc.status}</span></h2>
+      <div className="detail-heading">
+        <h2>{inc.title} <span className={`status ${inc.status}`}>{inc.status}</span></h2>
+        <button className="secondary-button" onClick={load} disabled={refreshing}>
+          {refreshing ? "Refreshing…" : "↻ Refresh"}
+        </button>
+      </div>
       <p className="muted">{inc.service} · {inc.category || "unclassified"} · {inc.severity || "—"}</p>
 
       <section className="card">
