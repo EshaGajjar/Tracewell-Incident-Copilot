@@ -13,10 +13,13 @@ const EVENT_TYPES = {
 
 function getEventDetails(step) {
   const key = step.tool || step.type || "investigation";
-  return EVENT_TYPES[key] || {
-    icon: "⚙️",
-    title: key.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-  };
+
+  return (
+    EVENT_TYPES[key] || {
+      icon: "⚙️",
+      title: key.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+    }
+  );
 }
 
 function formatTimestamp(value) {
@@ -43,32 +46,44 @@ function formatValue(value) {
     : JSON.stringify(value, null, 2);
 }
 
+function getStepKey(step, index) {
+  return step.id || `${step.index ?? "step"}-${index}`;
+}
+
 export default function IncidentDetail({ id }) {
   const [inc, setInc] = useState(null);
   const [steps, setSteps] = useState([]);
+  const [operationalEvents, setOperationalEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [investigating, setInvestigating] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [operationalLoadError, setOperationalLoadError] = useState("");
 
   useEffect(() => {
     let active = true;
 
     async function load() {
       try {
-        const [incident, timeline] = await Promise.all([
+        const [incident, timeline, events] = await Promise.all([
           request(`/incidents/${encodeURIComponent(id)}`),
           request(`/incidents/${encodeURIComponent(id)}/steps`),
+          request(`/incidents/${encodeURIComponent(id)}/events`),
         ]);
 
         if (!active) return;
 
         setInc(incident);
         setSteps(Array.isArray(timeline) ? timeline : []);
+        setOperationalEvents(Array.isArray(events) ? events : []);
         setLoadError("");
+        setOperationalLoadError("");
       } catch (error) {
         if (!active) return;
 
         setLoadError(error.message || "Unable to load incident.");
+        setOperationalLoadError(
+          error.message || "Unable to load operational events."
+        );
       }
     }
 
@@ -85,19 +100,26 @@ export default function IncidentDetail({ id }) {
   async function startInvestigation() {
     setInvestigating(true);
     setLoadError("");
+    setOperationalLoadError("");
 
     try {
       await api("/investigate", { incident_id: id });
 
-      const [incident, timeline] = await Promise.all([
+      const [incident, timeline, events] = await Promise.all([
         request(`/incidents/${encodeURIComponent(id)}`),
         request(`/incidents/${encodeURIComponent(id)}/steps`),
+        request(`/incidents/${encodeURIComponent(id)}/events`),
       ]);
 
       setInc(incident);
       setSteps(Array.isArray(timeline) ? timeline : []);
+      setOperationalEvents(Array.isArray(events) ? events : []);
+      setOperationalLoadError("");
     } catch (error) {
       setLoadError(error.message || "Investigation failed.");
+      setOperationalLoadError(
+        error.message || "Unable to load operational events."
+      );
     } finally {
       setInvestigating(false);
     }
@@ -108,7 +130,11 @@ export default function IncidentDetail({ id }) {
   }
 
   if (!inc && loadError) {
-    return <p className="error" role="alert">{loadError}</p>;
+    return (
+      <p className="error" role="alert">
+        {loadError}
+      </p>
+    );
   }
 
   const diag = inc.diagnosis;
@@ -116,15 +142,24 @@ export default function IncidentDetail({ id }) {
   const closed = ["resolved", "closed"].includes(inc.status);
 
   const sortedSteps = [...steps].sort((a, b) => {
-    const timeA = a.ts?.seconds
-      ? a.ts.seconds * 1000
-      : new Date(a.ts || 0).getTime();
+    const timeA =
+      a.ts?.seconds != null
+        ? a.ts.seconds * 1000
+        : new Date(a.ts || 0).getTime();
 
-    const timeB = b.ts?.seconds
-      ? b.ts.seconds * 1000
-      : new Date(b.ts || 0).getTime();
+    const timeB =
+      b.ts?.seconds != null
+        ? b.ts.seconds * 1000
+        : new Date(b.ts || 0).getTime();
 
     return timeA - timeB || (a.index ?? 0) - (b.index ?? 0);
+  });
+
+  const sortedOperationalEvents = [...operationalEvents].sort((a, b) => {
+    const timeA = new Date(a.timestamp || 0).getTime();
+    const timeB = new Date(b.timestamp || 0).getTime();
+
+    return timeA - timeB;
   });
 
   return (
@@ -147,7 +182,7 @@ export default function IncidentDetail({ id }) {
         </div>
 
         <span className="timeline-count">
-          {steps.length} EVENTS
+          {steps.length} INVESTIGATION STEPS
         </span>
       </div>
 
@@ -192,26 +227,82 @@ export default function IncidentDetail({ id }) {
         )}
       </section>
 
-      {/* Incident Timeline */}
+      {/* Operational Incident Timeline */}
 
       <section className="card incident-timeline-section">
         <div className="timeline-header">
           <div>
-            <h3>Incident Timeline</h3>
+            <h3>Operational Incident Timeline</h3>
+            <p>Actual service events recorded for this incident.</p>
+          </div>
+
+          <span className="timeline-count">
+            {operationalEvents.length} EVENTS
+          </span>
+        </div>
+
+        {operationalLoadError ? (
+          <p className="error" role="alert">
+            {operationalLoadError}
+          </p>
+        ) : sortedOperationalEvents.length === 0 ? (
+          <div className="timeline-empty">
+            <p>No operational events recorded yet.</p>
+          </div>
+        ) : (
+          <div className="operational-event-list">
+            {sortedOperationalEvents.map((event, index) => (
+              <article
+                className="timeline-evidence-block"
+                key={event.id || `${event.event_type || "event"}-${index}`}
+              >
+                <h4>
+                  {(event.event_type || "event")
+                    .replaceAll("_", " ")
+                    .replace(/\b\w/g, (c) => c.toUpperCase())}
+                </h4>
+
+                <p>{event.description || "No description available."}</p>
+
+                <p className="muted">
+                  {formatTimestamp(event.timestamp)} ·{" "}
+                  {event.service || inc.service || "Unknown service"}
+                </p>
+
+                {event.evidence != null &&
+                  typeof event.evidence === "object" &&
+                  Object.keys(event.evidence).length > 0 && (
+                    <details>
+                      <summary>Inspect evidence</summary>
+                      <pre>{formatValue(event.evidence)}</pre>
+                    </details>
+                  )}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* AI Investigation Activity */}
+
+      <section className="card incident-timeline-section">
+        <div className="timeline-header">
+          <div>
+            <h3>AI Investigation Activity</h3>
             <p>
-              Explore investigation events and inspect their supporting
+              Explore the steps the copilot took and inspect supporting
               evidence.
             </p>
           </div>
 
           <span className="timeline-count">
-            {steps.length} EVENTS
+            {steps.length} INVESTIGATION STEPS
           </span>
         </div>
 
         {sortedSteps.length === 0 ? (
           <div className="timeline-empty">
-            <p>No investigation events yet.</p>
+            <p>No investigation activity yet.</p>
             <p>Start an investigation to collect evidence.</p>
           </div>
         ) : (
@@ -219,22 +310,18 @@ export default function IncidentDetail({ id }) {
             <div className="timeline-grid">
               {sortedSteps.map((step, index) => {
                 const event = getEventDetails(step);
-                const selected =
-                  selectedEvent === (step.id || `${step.index}-${index}`);
+                const stepKey = getStepKey(step, index);
+                const selected = selectedEvent === stepKey;
 
                 return (
                   <button
                     type="button"
-                    key={step.id || `${step.index}-${index}`}
+                    key={stepKey}
                     className={`timeline-event-card ${
                       selected ? "selected" : ""
                     }`}
                     onClick={() =>
-                      setSelectedEvent(
-                        selected
-                          ? null
-                          : step.id || `${step.index}-${index}`
-                      )
+                      setSelectedEvent(selected ? null : stepKey)
                     }
                   >
                     <span className="timeline-event-icon">
@@ -250,7 +337,7 @@ export default function IncidentDetail({ id }) {
 
                       <span className="timeline-event-action">
                         {selected
-                          ? "Selected event"
+                          ? "Selected step"
                           : "Inspect evidence →"}
                       </span>
                     </span>
@@ -259,53 +346,54 @@ export default function IncidentDetail({ id }) {
               })}
             </div>
 
-            {selectedEvent !== null && (() => {
-              const selectedIndex = sortedSteps.findIndex(
-                (step, index) =>
-                  (step.id || `${step.index}-${index}`) === selectedEvent
-              );
+            {selectedEvent !== null &&
+              (() => {
+                const selectedIndex = sortedSteps.findIndex(
+                  (step, index) =>
+                    getStepKey(step, index) === selectedEvent
+                );
 
-              const step = sortedSteps[selectedIndex];
+                const step = sortedSteps[selectedIndex];
 
-              if (!step) return null;
+                if (!step) return null;
 
-              const event = getEventDetails(step);
+                const event = getEventDetails(step);
 
-              return (
-                <div className="timeline-evidence">
-                  <div className="timeline-evidence-label">
-                    SELECTED EVENT
-                  </div>
-
-                  <h4>
-                    {event.icon} {event.title}
-                  </h4>
-
-                  <p className="muted">
-                    {formatTimestamp(step.ts)}
-                  </p>
-
-                  <div className="timeline-evidence-block">
-                    <h4>Event type</h4>
-                    <p>{step.type || "Investigation step"}</p>
-                  </div>
-
-                  {step.input != null && (
-                    <div className="timeline-evidence-block">
-                      <h4>Input</h4>
-                      <pre>{formatValue(step.input)}</pre>
+                return (
+                  <div className="timeline-evidence">
+                    <div className="timeline-evidence-label">
+                      SELECTED INVESTIGATION STEP
                     </div>
-                  )}
 
-                  {step.output != null && (
+                    <h4>
+                      {event.icon} {event.title}
+                    </h4>
+
+                    <p className="muted">
+                      {formatTimestamp(step.ts)}
+                    </p>
+
                     <div className="timeline-evidence-block">
-                      <h4>Supporting evidence</h4>
-                      <pre>{formatValue(step.output)}</pre>
+                      <h4>Event type</h4>
+                      <p>{step.type || "Investigation step"}</p>
                     </div>
-                  )}
-                </div>
-              );
-            })()}
+
+                    {step.input != null && (
+                      <div className="timeline-evidence-block">
+                        <h4>Input</h4>
+                        <pre>{formatValue(step.input)}</pre>
+                      </div>
+                    )}
+
+                    {step.output != null && (
+                      <div className="timeline-evidence-block">
+                        <h4>Supporting evidence</h4>
+                        <pre>{formatValue(step.output)}</pre>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
           </>
         )}
       </section>
@@ -342,9 +430,7 @@ export default function IncidentDetail({ id }) {
 
       {/* Recommended action */}
 
-      {pending && (
-        <ActionPanel id={id} pending={pending} />
-      )}
+      {pending && <ActionPanel id={id} pending={pending} />}
 
       {/* Verification */}
 
@@ -365,6 +451,7 @@ export default function IncidentDetail({ id }) {
               const updated = await request(
                 `/incidents/${encodeURIComponent(id)}`
               );
+
               setInc(updated);
             } catch {
               // The regular refresh will reload the incident.
@@ -404,7 +491,10 @@ function CloseForm({ id, onClosed }) {
   const [error, setError] = useState("");
 
   async function closeIncident() {
-    if (rootCause.trim().length < 3 || resolution.trim().length < 3) {
+    if (
+      rootCause.trim().length < 3 ||
+      resolution.trim().length < 3
+    ) {
       setError("Please enter the root cause and resolution.");
       return;
     }
@@ -510,9 +600,7 @@ function ActionPanel({ id, pending }) {
           </button>
         </div>
       ) : (
-        <p className="muted">
-          Decision: {actionStatus}
-        </p>
+        <p className="muted">Decision: {actionStatus}</p>
       )}
 
       {error && <p className="error">{error}</p>}
