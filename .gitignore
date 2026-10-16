@@ -14,3 +14,5 @@ __pycache__/
 backend/tracewell_local.sqlite3
 backend/tracewell_local.sqlite3-shm
 backend/tracewell_local.sqlite3-wal
+# macOS system files
+.DS_Store

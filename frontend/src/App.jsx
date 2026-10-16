@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import IncidentList from "./components/IncidentList.jsx";
 import IncidentDetail from "./components/IncidentDetail.jsx";
 import ReportForm from "./components/ReportForm.jsx";
@@ -8,19 +8,27 @@ export default function App() {
   const [view, setView] = useState({ name: "list" });
   const [incidents, setIncidents] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [incidentsLoading, setIncidentsLoading] = useState(true);
+  const [incidentsError, setIncidentsError] = useState("");
+
+  // One source of truth for incidents: fetch on startup and only when explicitly refreshed.
+  const refreshIncidents = useCallback(async () => {
+    setIncidentsLoading(true);
+    setIncidentsError("");
+    try {
+      const rows = await request("/incidents");
+      setIncidents(Array.isArray(rows) ? rows : []);
+      setLastUpdated(new Date());
+    } catch (error) {
+      setIncidentsError(error?.message || "Could not load incidents");
+    } finally {
+      setIncidentsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let active = true;
-    async function refresh() {
-      try {
-        const rows = await request("/incidents");
-        if (active) { setIncidents(rows); setLastUpdated(new Date()); }
-      } catch { /* IncidentList surfaces actionable API errors. */ }
-    }
-    refresh();
-    const timer = setInterval(refresh, 5000);
-    return () => { active = false; clearInterval(timer); };
-  }, []);
+    refreshIncidents();
+  }, [refreshIncidents]);
 
   const activeCount = incidents.filter((i) => !["closed", "resolved", "rejected"].includes(i.status)).length;
   const awaiting = incidents.filter((i) => i.status === "awaiting_approval").length;
@@ -45,7 +53,7 @@ export default function App() {
       <main className="main-area">
         <header className="topbar">
           <div className="breadcrumbs">Workspace <span>/</span> <strong>{view.name === "new" ? "New incident" : view.name === "detail" ? "Incident detail" : "Overview"}</strong></div>
-          <div className="topbar-right"><span className="live-pill"><span className="pulse-dot" /> LIVE MONITORING</span><button className="primary-button compact" onClick={() => setView({ name: "new" })}>＋ Report incident</button></div>
+          <div className="topbar-right"><span className="live-pill"><span className="pulse-dot" /> MANUAL REFRESH</span><button className="primary-button compact" onClick={() => setView({ name: "new" })}>＋ Report incident</button></div>
         </header>
 
         {!API_URL && <div className="notice warning">Backend URL is missing. Set <code>VITE_API_URL=http://localhost:8000</code> in <code>frontend/.env</code>, then restart Vite.</div>}
@@ -61,9 +69,9 @@ export default function App() {
             <Metric label="AWAITING APPROVAL" value={awaiting} detail="Human decision needed" icon="⌁" tone="amber" />
             <Metric label="HIGH SEVERITY" value={critical} detail="SEV1 · SEV2 active" icon="↗" tone="rose" />
           </section>
-          <section className="content-panel"><IncidentList onOpen={(id) => setView({ name: "detail", id })} onCreate={() => setView({ name: "new" })} /></section>
+          <section className="content-panel"><IncidentList items={incidents} loading={incidentsLoading} error={incidentsError} onRefresh={refreshIncidents} onOpen={(id) => setView({ name: "detail", id })} onCreate={() => setView({ name: "new" })} /></section>
         </>}
-        {view.name === "new" && <section className="page-content"><div className="eyebrow">INCIDENT INTAKE</div><h1>Report an incident<span className="title-period">.</span></h1><p className="page-lede">Capture the signal. Let Tracewell assemble the evidence.</p><ReportForm onCreated={(id) => setView({ name: "detail", id })} /></section>}
+        {view.name === "new" && <section className="page-content"><div className="eyebrow">INCIDENT INTAKE</div><h1>Report an incident<span className="title-period">.</span></h1><p className="page-lede">Capture the signal. Let Tracewell assemble the evidence.</p><ReportForm onCreated={async (id) => { await refreshIncidents(); setView({ name: "detail", id }); }} /></section>}
         {view.name === "detail" && <section className="page-content"><button className="back-link" onClick={() => setView({ name: "list" })}>← Back to overview</button><IncidentDetail id={view.id} /></section>}
         <footer className="footer"><span>TRACEWELL <span className="footer-dot">●</span> INCIDENT COPILOT</span><span>AI-assisted analysis · Human-controlled action</span></footer>
       </main>

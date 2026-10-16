@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { request } from "../firebase.js";
+import { useState } from "react";
 
 function prettyStatus(value = "open") { return value.replaceAll("_", " "); }
 function relativeTime(value) {
@@ -14,24 +13,9 @@ function relativeTime(value) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-export default function IncidentList({ onOpen, onCreate }) {
-  const [items, setItems] = useState([]);
-  const [error, setError] = useState("");
+export default function IncidentList({ items = [], loading = false, error = "", onRefresh, onOpen, onCreate }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let active = true;
-    async function load() {
-      try { const rows = await request("/incidents"); if (active) { setItems(rows); setError(""); } }
-      catch (e) { if (active) setError(e.message || "Could not load incidents"); }
-      finally { if (active) setLoading(false); }
-    }
-    load();
-    const timer = setInterval(load, 5000);
-    return () => { active = false; clearInterval(timer); };
-  }, []);
 
   const visible = items.filter((i) => {
     const matchesFilter = filter === "all" || (filter === "active" ? !["closed", "resolved", "rejected"].includes(i.status) : i.status === filter);
@@ -40,7 +24,7 @@ export default function IncidentList({ onOpen, onCreate }) {
   });
 
   return <div className="incident-section">
-    <div className="section-heading"><div><div className="eyebrow">LIVE FEED</div><h2>Recent incidents <span className="count-badge">{items.length}</span></h2><p>Every signal, one place to investigate and resolve.</p></div><button className="primary-button" onClick={onCreate}>＋ New incident</button></div>
+    <div className="section-heading"><div><div className="eyebrow">INCIDENT FEED</div><h2>Recent incidents <span className="count-badge">{items.length}</span></h2><p>Every signal, one place to investigate and resolve.</p></div><div className="section-actions"><button className="secondary-button" onClick={onRefresh} disabled={loading} aria-label="Refresh incidents">{loading ? "Refreshing…" : "↻ Refresh"}</button><button className="primary-button" onClick={onCreate}>＋ New incident</button></div></div>
     <div className="list-toolbar"><div className="filter-tabs">
       {[ ["all", "All incidents"], ["active", "Active"], ["awaiting_approval", "Needs approval"], ["closed", "Closed"] ].map(([key, label]) => <button key={key} className={filter === key ? "filter-tab active" : "filter-tab"} onClick={() => setFilter(key)}>{label}</button>)}
     </div><label className="search-box"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search incidents…" /></label></div>
@@ -56,6 +40,6 @@ export default function IncidentList({ onOpen, onCreate }) {
           <td className="time-cell">{relativeTime(i.created_at)}</td><td className="row-arrow">↗</td>
         </tr>)}
       </tbody></table></div>}
-    <div className="list-foot"><span><span className="pulse-dot" /> Auto-refreshing every 5 seconds</span><span>{visible.length} of {items.length} incidents</span></div>
+    <div className="list-foot"><span>{loading ? "Fetching incidents…" : "Manual refresh"}</span><span>{visible.length} of {items.length} incidents</span></div>
   </div>;
 }
