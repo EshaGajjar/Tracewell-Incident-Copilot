@@ -550,18 +550,22 @@ def append_operational_event(
         return _write_event(transaction)
 
     event = {
-        "id": event_id,
-        "incident_id": incident_id,
-        "event_type": event_type,
-        "service": service,
-        "description": description,
-        "timestamp": timestamp,
-        "evidence": evidence or {},
-        "recorded_at": _firestore_module.SERVER_TIMESTAMP,
+    "id": event_id,
+    "incident_id": incident_id,
+    "event_type": event_type,
+    "service": service,
+    "description": description,
+    "timestamp": timestamp,
+    "evidence": evidence or {},
+    "recorded_at": _firestore_module.SERVER_TIMESTAMP,
     }
 
     event_ref.set(event)
-    return event
+
+    # Return JSON-safe data. Firestore resolves SERVER_TIMESTAMP when
+    # the document is written, but the sentinel itself is not JSON serializable.
+    saved_event = event_ref.get()
+    return {"id": saved_event.id, **(saved_event.to_dict() or {})}
 
 
 def list_operational_events(incident_id: str) -> list[dict[str, Any]]:
