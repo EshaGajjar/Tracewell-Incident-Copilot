@@ -62,6 +62,44 @@ def get_incident_steps(incident_id: str) -> list[dict[str, Any]]:
         raise HTTPException(status_code=404, detail="Incident not found")
     return list_steps(incident_id)
 
+@app.get("/incidents/{incident_id}/events")
+def get_incident_events(incident_id: str) -> list[dict[str, Any]]:
+    """Return operational timeline events attached to an incident.
+
+    Copilot investigation steps are served by `/steps`; operational events are
+    separate evidence. Existing incidents without operational event data return
+    an empty list so the frontend can render its empty state instead of receiving
+    a 404. Unknown incidents still return 404.
+    """
+    incident = get_incident(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    events = incident.get("operational_events")
+    if events is None:
+        events = incident.get("events", [])
+    if not isinstance(events, list):
+        logger.warning("Incident %s has malformed operational events; returning empty list", incident_id)
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        evidence = event.get("evidence", {})
+        if not isinstance(evidence, (dict, list, str, int, float, bool)) and evidence is not None:
+            evidence = {}
+        normalized.append({
+            "id": str(event.get("id") or f"{incident_id}-event-{index}"),
+            "event_type": str(event.get("event_type") or event.get("type") or "event"),
+            "description": str(event.get("description") or ""),
+            "timestamp": event.get("timestamp") or event.get("ts") or incident.get("created_at"),
+            "service": event.get("service") or incident.get("service"),
+            "evidence": evidence if evidence is not None else {},
+        })
+    normalized.sort(key=lambda event: str(event.get("timestamp") or ""))
+    return normalized
+
 @app.post("/incidents")
 def create_incident(request: CreateIncidentRequest) -> dict[str, Any]:
     """Create an incident through the same store used by the investigation API."""

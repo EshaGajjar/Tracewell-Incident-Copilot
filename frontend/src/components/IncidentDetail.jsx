@@ -58,53 +58,11 @@ export default function IncidentDetail({ id }) {
   const [investigating, setInvestigating] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [operationalLoadError, setOperationalLoadError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-
-    async function load() {
-      try {
-        const [incident, timeline, events] = await Promise.all([
-          request(`/incidents/${encodeURIComponent(id)}`),
-          request(`/incidents/${encodeURIComponent(id)}/steps`),
-          request(`/incidents/${encodeURIComponent(id)}/events`),
-        ]);
-
-        if (!active) return;
-
-        setInc(incident);
-        setSteps(Array.isArray(timeline) ? timeline : []);
-        setOperationalEvents(Array.isArray(events) ? events : []);
-        setLoadError("");
-        setOperationalLoadError("");
-      } catch (error) {
-        if (!active) return;
-
-        setLoadError(error.message || "Unable to load incident.");
-        setOperationalLoadError(
-          error.message || "Unable to load operational events."
-        );
-      }
-    }
-
-    load();
-
-    const timer = setInterval(load, 5000);
-
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [id]);
-
-  async function startInvestigation() {
-    setInvestigating(true);
-    setLoadError("");
-    setOperationalLoadError("");
-
+  const load = useCallback(async () => {
+    setRefreshing(true);
     try {
-      await api("/investigate", { incident_id: id });
-
       const [incident, timeline, events] = await Promise.all([
         request(`/incidents/${encodeURIComponent(id)}`),
         request(`/incidents/${encodeURIComponent(id)}/steps`),
@@ -114,7 +72,32 @@ export default function IncidentDetail({ id }) {
       setInc(incident);
       setSteps(Array.isArray(timeline) ? timeline : []);
       setOperationalEvents(Array.isArray(events) ? events : []);
+      setLoadError("");
       setOperationalLoadError("");
+    } catch (error) {
+      const message = error.message || "Unable to load incident.";
+      setLoadError(message);
+      setOperationalLoadError(message);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  async function startInvestigation() {
+    setInvestigating(true);
+    setLoadError("");
+    setOperationalLoadError("");
+
+    try {
+      await api("/investigate", { incident_id: id });
+
+      await load();
     } catch (error) {
       setLoadError(error.message || "Investigation failed.");
       setOperationalLoadError(
@@ -161,64 +144,6 @@ export default function IncidentDetail({ id }) {
 
     return timeA - timeB;
   });
-
-  return (
-    <div className="detail">
-      <div className="incident-detail-heading">
-        <div>
-          <div className="eyebrow">INCIDENT INVESTIGATION</div>
-
-          <h2>
-            {inc.title}
-            <span className={`status ${inc.status}`}>
-              {inc.status?.replaceAll("_", " ")}
-            </span>
-          </h2>
-
-          <p className="muted">
-            {inc.service} · {inc.category || "Unclassified"} ·{" "}
-            {inc.severity || "No severity"}
-          </p>
-        </div>
-
-        <span className="timeline-count">
-          {steps.length} INVESTIGATION STEPS
-        </span>
-      </div>
-
-      {loadError && (
-        <div className="notice error-notice" role="alert">
-          {loadError}
-        </div>
-      )}
-  const [refreshing, setRefreshing] = useState(false);
-
-  // Fetch once when opening the detail page. Use the Refresh button for updates
-  // instead of polling the API every 2.5 seconds.
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const [incident, timeline] = await Promise.all([
-        request(`/incidents/${encodeURIComponent(id)}`),
-        request(`/incidents/${encodeURIComponent(id)}/steps`),
-      ]);
-      setInc(incident);
-      setSteps(Array.isArray(timeline) ? timeline : []);
-    } catch (e) {
-      setInc((current) => current || { id, title: "Could not load incident", description: e.message, status: "error" });
-    } finally {
-      setRefreshing(false);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  if (!inc) return <p className="muted">Loading…</p>;
-  if (inc.status === "error") return <p className="error" role="alert">{inc.description}</p>;
-  const diag = inc.diagnosis, pending = inc.pending_action;
-  const closed = inc.status === "resolved" || inc.status === "closed";
 
   return (
     <div className="detail">
