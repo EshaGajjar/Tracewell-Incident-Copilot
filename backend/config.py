@@ -10,7 +10,13 @@ except ImportError:
     pass
 
 APP_NAME = os.getenv("ADK_APP_NAME", "tracewell_incident_copilot")
-GCP_PROJECT = os.getenv("GCP_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCLOUD_PROJECT")
+_raw_project = (
+    os.getenv("GCP_PROJECT")
+    or os.getenv("GOOGLE_CLOUD_PROJECT")
+    or os.getenv("GCLOUD_PROJECT")
+    or os.getenv("GCP_PROJECT_ID")
+)
+GCP_PROJECT = None if not _raw_project or _raw_project.strip() in ("", "your-project-id", "your-gcp-project") else _raw_project.strip()
 GCP_REGION = os.getenv("GCP_REGION", "us-central1")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 USE_VERTEX_AI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "true").lower() == "true"

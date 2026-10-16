@@ -4,7 +4,15 @@ import asyncio
 import json
 import re
 from typing import Any
-from .config import APP_NAME, GEMINI_MODEL, MAX_AGENT_STEPS, USE_VERTEX_AI
+from .config import (
+    APP_NAME,
+    GCP_PROJECT,
+    GCP_REGION,
+    GEMINI_MODEL,
+    LOCAL_FALLBACK,
+    MAX_AGENT_STEPS,
+    USE_VERTEX_AI,
+)
 from .retrieval import search_knowledge, search_past_incidents
 from .store import append_step, get_incident, update_incident
 from .tools import build_tools
@@ -80,22 +88,35 @@ def _fallback_investigation(incident_id: str, incident: dict[str, Any]) -> dict[
         pending = {"action":action, "reason":"Fallback recommendation; confirm live evidence and target before approval.", "target_revision":target or None, "status":"pending"}
         update_incident(incident_id, {"pending_action":pending, "status":"awaiting_approval"})
     append_step(incident_id, step_type="tool_result", tool="submit_diagnosis", input_data={}, output_data={"saved":True,"diagnosis":diagnosis})
-    return {"mode":"local_fallback", "diagnosis":diagnosis, "pending_action": action or None,
-            "knowledge_results":len(knowledge.get("results", [])), "past_incident_results":len(incidents.get("results", []))}
+    return {
+        "status": "awaiting_approval" if action else "investigating",
+        "mode": "local_fallback",
+        "diagnosis": diagnosis,
+        "pending_action": action or None,
+        "knowledge_results": len(knowledge.get("results", [])),
+        "past_incident_results": len(incidents.get("results", [])),
+    }
 
 
 async def run_investigation(incident_id: str) -> dict[str, Any]:
     incident = get_incident(incident_id)
     if not incident:
         raise KeyError(f"Incident {incident_id!r} was not found")
-    update_incident(incident_id, {"status":"investigating"})
-    append_step(incident_id, step_type="message", tool="investigation", input_data={"incident_id":incident_id}, output_data="Investigation started.")
+    update_incident(incident_id, {"status": "investigating"})
+    append_step(
+        incident_id,
+        step_type="message",
+        tool="investigation",
+        input_data={"incident_id": incident_id},
+        output_data="Investigation started.",
+    )
+    if not GCP_PROJECT and LOCAL_FALLBACK:
+        return _fallback_investigation(incident_id, incident)
     try:
         from google.adk.agents import Agent
         from google.adk.runners import Runner
         from google.adk.sessions import InMemorySessionService
         from google.genai import types
-        from .config import GCP_PROJECT, GCP_REGION
         if USE_VERTEX_AI:
             import os
             if GCP_PROJECT:

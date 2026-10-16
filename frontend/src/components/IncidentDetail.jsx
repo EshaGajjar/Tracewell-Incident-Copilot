@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, request } from "../firebase.js";
+import CausalGraphView from "./CausalGraphView.jsx";
 
 const EVENT_TYPES = {
   investigation: { icon: "🕵️", title: "Investigation Started" },
@@ -50,7 +51,7 @@ function getStepKey(step, index) {
   return step.id || `${step.index ?? "step"}-${index}`;
 }
 
-export default function IncidentDetail({ id }) {
+export default function IncidentDetail({ id, onNavigateToDependencies }) {
   const [inc, setInc] = useState(null);
   const [steps, setSteps] = useState([]);
   const [operationalEvents, setOperationalEvents] = useState([]);
@@ -58,16 +59,25 @@ export default function IncidentDetail({ id }) {
   const [investigating, setInvestigating] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [operationalLoadError, setOperationalLoadError] = useState("");
+  const [serviceDeps, setServiceDeps] = useState(null);
+  const [serviceImpact, setServiceImpact] = useState(null);
+  const [correlatedData, setCorrelatedData] = useState(null);
+  const [correlationFilter, setCorrelationFilter] = useState("all");
+  const [rootCauseAnalysis, setRootCauseAnalysis] = useState(null);
+  const [analyzingRootCause, setAnalyzingRootCause] = useState(false);
+  const [rcaError, setRcaError] = useState("");
 
   useEffect(() => {
     let active = true;
 
     async function load() {
       try {
-        const [incident, timeline, events] = await Promise.all([
+        const [incident, timeline, events, corrRes, rcaRes] = await Promise.all([
           request(`/incidents/${encodeURIComponent(id)}`),
           request(`/incidents/${encodeURIComponent(id)}/steps`),
           request(`/incidents/${encodeURIComponent(id)}/events`),
+          request(`/incidents/${encodeURIComponent(id)}/correlated-events`).catch(() => null),
+          request(`/incidents/${encodeURIComponent(id)}/root-cause-analysis`).catch(() => null),
         ]);
 
         if (!active) return;
@@ -75,8 +85,26 @@ export default function IncidentDetail({ id }) {
         setInc(incident);
         setSteps(Array.isArray(timeline) ? timeline : []);
         setOperationalEvents(Array.isArray(events) ? events : []);
+        if (corrRes) setCorrelatedData(corrRes);
+        if (rcaRes) setRootCauseAnalysis(rcaRes);
         setLoadError("");
         setOperationalLoadError("");
+
+        // Fetch service dependencies and downstream impact if service is specified
+        if (incident?.service) {
+          try {
+            const [depData, impactData] = await Promise.all([
+              request(`/services/${encodeURIComponent(incident.service)}/dependencies`),
+              request(`/services/${encodeURIComponent(incident.service)}/downstream-impact`),
+            ]);
+            if (active) {
+              setServiceDeps(depData);
+              setServiceImpact(impactData);
+            }
+          } catch {
+            // Non-critical if dependencies not yet initialized
+          }
+        }
       } catch (error) {
         if (!active) return;
 
@@ -93,9 +121,29 @@ export default function IncidentDetail({ id }) {
 
     return () => {
       active = false;
+
       clearInterval(timer);
     };
   }, [id]);
+
+  async function triggerRootCauseAnalysis() {
+    setAnalyzingRootCause(true);
+    setRcaError("");
+
+    try {
+      const res = await api(
+        `/incidents/${encodeURIComponent(id)}/root-cause-analysis`,
+        {}
+      );
+      setRootCauseAnalysis(res);
+      const updated = await request(`/incidents/${encodeURIComponent(id)}`);
+      setInc(updated);
+    } catch (err) {
+      setRcaError(err.message || "Failed to generate root-cause analysis.");
+    } finally {
+      setAnalyzingRootCause(false);
+    }
+  }
 
   async function startInvestigation() {
     setInvestigating(true);
@@ -105,15 +153,19 @@ export default function IncidentDetail({ id }) {
     try {
       await api("/investigate", { incident_id: id });
 
-      const [incident, timeline, events] = await Promise.all([
+      const [incident, timeline, events, corrRes, rcaRes] = await Promise.all([
         request(`/incidents/${encodeURIComponent(id)}`),
         request(`/incidents/${encodeURIComponent(id)}/steps`),
         request(`/incidents/${encodeURIComponent(id)}/events`),
+        request(`/incidents/${encodeURIComponent(id)}/correlated-events`).catch(() => null),
+        request(`/incidents/${encodeURIComponent(id)}/root-cause-analysis`).catch(() => null),
       ]);
 
       setInc(incident);
       setSteps(Array.isArray(timeline) ? timeline : []);
       setOperationalEvents(Array.isArray(events) ? events : []);
+      if (corrRes) setCorrelatedData(corrRes);
+      if (rcaRes) setRootCauseAnalysis(rcaRes);
       setOperationalLoadError("");
     } catch (error) {
       setLoadError(error.message || "Investigation failed.");
@@ -124,6 +176,7 @@ export default function IncidentDetail({ id }) {
       setInvestigating(false);
     }
   }
+
 
   if (!inc && !loadError) {
     return <p className="muted">Loading incident...</p>;
@@ -191,44 +244,6 @@ export default function IncidentDetail({ id }) {
           {loadError}
         </div>
       )}
-  const [refreshing, setRefreshing] = useState(false);
-
-  // Fetch once when opening the detail page. Use the Refresh button for updates
-  // instead of polling the API every 2.5 seconds.
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const [incident, timeline] = await Promise.all([
-        request(`/incidents/${encodeURIComponent(id)}`),
-        request(`/incidents/${encodeURIComponent(id)}/steps`),
-      ]);
-      setInc(incident);
-      setSteps(Array.isArray(timeline) ? timeline : []);
-    } catch (e) {
-      setInc((current) => current || { id, title: "Could not load incident", description: e.message, status: "error" });
-    } finally {
-      setRefreshing(false);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  if (!inc) return <p className="muted">Loading…</p>;
-  if (inc.status === "error") return <p className="error" role="alert">{inc.description}</p>;
-  const diag = inc.diagnosis, pending = inc.pending_action;
-  const closed = inc.status === "resolved" || inc.status === "closed";
-
-  return (
-    <div className="detail">
-      <div className="detail-heading">
-        <h2>{inc.title} <span className={`status ${inc.status}`}>{inc.status}</span></h2>
-        <button className="secondary-button" onClick={load} disabled={refreshing}>
-          {refreshing ? "Refreshing…" : "↻ Refresh"}
-        </button>
-      </div>
-      <p className="muted">{inc.service} · {inc.category || "unclassified"} · {inc.severity || "—"}</p>
 
       <section className="card">
         <h3>Incident details</h3>
@@ -262,6 +277,238 @@ export default function IncidentDetail({ id }) {
               ? "Investigation running..."
               : "Investigate with Copilot"}
           </button>
+        )}
+      </section>
+
+      {/* Service Dependencies & Cascading Impact */}
+      {inc.service && (
+        <section className="card service-impact-section">
+          <div className="timeline-header">
+            <div>
+              <div className="eyebrow">DEPENDENCY TOPOLOGY & IMPACT</div>
+              <h3>Service Dependencies & Cascading Impact</h3>
+              <p>
+                Architecture dependencies and downstream blast radius for <strong>{inc.service}</strong>.
+              </p>
+            </div>
+            {onNavigateToDependencies && (
+              <button
+                className="secondary-button compact"
+                onClick={() => onNavigateToDependencies(inc.service)}
+              >
+                Explore in Service Map →
+              </button>
+            )}
+          </div>
+
+          <div className="service-impact-grid">
+            {/* Downstream Impact Column */}
+            <div className="service-impact-col">
+              <div className="impact-col-header">
+                <strong>Potentially Affected Downstream Services</strong>
+                <span className="impact-col-count">
+                  {serviceImpact?.total_impacted ?? 0}
+                </span>
+              </div>
+              {!serviceImpact || serviceImpact.impacted_services.length === 0 ? (
+                <p className="muted">No downstream services depend on {inc.service}.</p>
+              ) : (
+                <div className="impact-badge-list">
+                  {serviceImpact.impacted_services.map((item) => (
+                    <div key={item.service_name} className={`impact-badge-item ${item.impact_level}`}>
+                      <div className="impact-badge-header">
+                        <span className="impact-service-title">{item.service_name}</span>
+                        <span className={`impact-level-tag ${item.impact_level}`}>
+                          {item.impact_level.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="impact-path-small">
+                        Depth {item.depth}: {item.dependency_path.join(" ──► ")}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Upstream Dependencies Column */}
+            <div className="service-impact-col">
+              <div className="impact-col-header">
+                <strong>Upstream Dependencies Required</strong>
+                <span className="impact-col-count">
+                  {serviceDeps?.upstream?.length ?? 0}
+                </span>
+              </div>
+              {!serviceDeps || serviceDeps.upstream.length === 0 ? (
+                <p className="muted">No upstream dependencies declared for {inc.service}.</p>
+              ) : (
+                <div className="upstream-badge-list">
+                  {serviceDeps.upstream.map((dep) => (
+                    <div key={dep.target} className="upstream-badge-item">
+                      <div className="upstream-badge-header">
+                        <span className="upstream-target-name">→ {dep.target}</span>
+                        <span className={`status-pill ${dep.verification_status}`}>
+                          {dep.verification_status}
+                        </span>
+                      </div>
+                      <div className="upstream-meta">
+                        <code>{dep.relationship_type.replace(/_/g, " ")}</code> · {dep.evidence}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Incident Causal Graph Visualization */}
+      <CausalGraphView incidentId={id} incidentService={inc?.service} />
+
+      {/* Evidence-Based Event Correlation */}
+      <section className="card correlation-section">
+        <div className="timeline-header">
+          <div>
+            <div className="eyebrow">EVIDENCE-BASED CORRELATION</div>
+            <h3>Correlated Operational Evidence</h3>
+            <p>
+              Events connected through exact service matching, revision metadata, and service dependencies.
+              Temporal proximity alone does not establish causation.
+            </p>
+          </div>
+          <div className="correlation-metrics-pills">
+            <span className="corr-stat direct">
+              {correlatedData?.direct_matches_count ?? 0} Direct
+            </span>
+            <span className="corr-stat dependency">
+              {correlatedData?.dependency_related_count ?? 0} Dependency
+            </span>
+            <span className="corr-stat temporal">
+              {correlatedData?.temporally_associated_count ?? 0} Temporal
+            </span>
+          </div>
+        </div>
+
+        {/* Filter Tabs */}
+        {correlatedData && correlatedData.events.length > 0 && (
+          <div className="correlation-filter-bar">
+            <span className="filter-label">Filter:</span>
+            <button
+              type="button"
+              className={`filter-chip ${correlationFilter === "all" ? "active" : ""}`}
+              onClick={() => setCorrelationFilter("all")}
+            >
+              All ({correlatedData.total_events})
+            </button>
+            <button
+              type="button"
+              className={`filter-chip ${correlationFilter === "direct_match" ? "active" : ""}`}
+              onClick={() => setCorrelationFilter("direct_match")}
+            >
+              Direct match ({correlatedData.direct_matches_count})
+            </button>
+            <button
+              type="button"
+              className={`filter-chip ${correlationFilter === "dependency_related" ? "active" : ""}`}
+              onClick={() => setCorrelationFilter("dependency_related")}
+            >
+              Dependency-related ({correlatedData.dependency_related_count})
+            </button>
+            <button
+              type="button"
+              className={`filter-chip ${correlationFilter === "temporally_associated" ? "active" : ""}`}
+              onClick={() => setCorrelationFilter("temporally_associated")}
+            >
+              Temporally associated ({correlatedData.temporally_associated_count})
+            </button>
+          </div>
+        )}
+
+        {!correlatedData || correlatedData.events.length === 0 ? (
+          <div className="timeline-empty">
+            <p>No operational events correlated for this incident yet.</p>
+            <p className="muted">Events will be evaluated against service name, revisions, and dependencies as they are recorded.</p>
+          </div>
+        ) : (
+          <div className="correlated-events-list">
+            {correlatedData.events
+              .filter(
+                (ev) =>
+                  correlationFilter === "all" ||
+                  ev.classification === correlationFilter
+              )
+              .map((ev, idx) => {
+                const isDirect = ev.classification === "direct_match";
+                const isDep = ev.classification === "dependency_related";
+                const isTemporal = ev.classification === "temporally_associated";
+
+                return (
+                  <article
+                    key={ev.event_id || `corr-${idx}`}
+                    className={`correlated-event-card ${ev.classification}`}
+                  >
+                    <div className="corr-card-topbar">
+                      <div className="corr-service-info">
+                        <span className="corr-icon">
+                          {ev.event_type === "deployment"
+                            ? "🚀"
+                            : ev.event_type === "error_log"
+                            ? "📋"
+                            : ev.event_type === "health_check"
+                            ? "💚"
+                            : "⚡"}
+                        </span>
+                        <strong className="corr-service-name">{ev.service}</strong>
+                        {ev.revision && (
+                          <code className="corr-revision-tag">{ev.revision}</code>
+                        )}
+                        <span className={`corr-severity ${ev.severity?.toLowerCase()}`}>
+                          {ev.severity || "INFO"}
+                        </span>
+                      </div>
+
+                      <div className="corr-badge-group">
+                        <span className={`corr-classification-badge ${ev.classification}`}>
+                          {ev.classification_label}
+                        </span>
+                        <span className="corr-time">{formatTimestamp(ev.timestamp)}</span>
+                      </div>
+                    </div>
+
+                    <p className="corr-description">{ev.description}</p>
+
+                    {/* Correlation Reason Callout */}
+                    <div className={`corr-reason-box ${ev.classification}`}>
+                      <div className="corr-reason-title">
+                        {isDirect && "🎯 Direct Service / Revision Match"}
+                        {isDep && (
+                          ev.relationship_direction === "upstream_dependency"
+                            ? "⬆️ Upstream Dependency Factor (Potential Root Cause)"
+                            : "⬇️ Downstream Dependent Impact (Cascading Symptom)"
+                        )}
+                        {isTemporal && "⏱️ Temporal Coincidence (Non-Causal Association)"}
+                        {!isDirect && !isDep && !isTemporal && "ℹ️ Correlation Analysis"}
+                      </div>
+                      <p className="corr-reason-text">{ev.correlation_reason}</p>
+                      {isTemporal && (
+                        <div className="temporal-disclaimer">
+                          ⚠️ Strict rule: Temporal proximity alone does not establish causation.
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Evidence Inspector */}
+                    {ev.evidence && Object.keys(ev.evidence).length > 0 && (
+                      <details className="corr-evidence-details">
+                        <summary>View evidence source ({ev.evidence_source})</summary>
+                        <pre>{formatValue(ev.evidence)}</pre>
+                      </details>
+                    )}
+                  </article>
+                );
+              })}
+          </div>
         )}
       </section>
 
@@ -436,35 +683,217 @@ export default function IncidentDetail({ id }) {
         )}
       </section>
 
-      {/* Diagnosis */}
+      {/* Evidence-Based Root-Cause Analysis */}
+      <section className="card root-cause-section">
+        <div className="timeline-header">
+          <div>
+            <div className="eyebrow">EVIDENCE-BASED ROOT-CAUSE ANALYSIS</div>
+            <h3>
+              Root-Cause Hypotheses{" "}
+              {rootCauseAnalysis?.hypotheses?.length > 0 && (
+                <span className="rca-count-tag">
+                  {rootCauseAnalysis.hypotheses.length} Ranked
+                </span>
+              )}
+            </h3>
+            <p>
+              Hypotheses synthesized strictly from observable telemetry, deployment records, and verified service dependencies.
+            </p>
+          </div>
 
-      {diag && (
-        <section className="card">
-          <h3>
-            Diagnosis{" "}
-            <span className={`strength ${diag.evidence_strength}`}>
-              {diag.evidence_strength || "Unrated"}
-            </span>
-          </h3>
+          <div className="rca-header-controls">
+            {rootCauseAnalysis && (
+              <span className={`rca-mode-badge ${rootCauseAnalysis.analysis_mode}`}>
+                {rootCauseAnalysis.analysis_mode === "gemini_vertex_ai"
+                  ? "✨ Gemini 2.5 Flash"
+                  : "⚙️ Deterministic Fallback"}
+              </span>
+            )}
+            <button
+              type="button"
+              className="action-btn-sm"
+              onClick={triggerRootCauseAnalysis}
+              disabled={analyzingRootCause}
+            >
+              {analyzingRootCause ? "Analyzing..." : "Re-analyze Root Cause"}
+            </button>
+          </div>
+        </div>
 
-          <p>{diag.root_cause}</p>
+        {rcaError && (
+          <div className="notice error-notice" role="alert">
+            {rcaError}
+          </div>
+        )}
 
-          {diag.evidence?.length > 0 && (
-            <>
-              <h4>Supporting evidence</h4>
+        {/* Insufficient Evidence State */}
+        {rootCauseAnalysis?.insufficient_evidence ? (
+          <div className="insufficient-evidence-card">
+            <div className="insufficient-header">
+              <span className="insufficient-icon">⚠️</span>
+              <div>
+                <h4>Insufficient evidence to determine root cause.</h4>
+                <p className="muted">
+                  The operational telemetry evaluated does not contain sufficient direct deployment errors or upstream failures to establish a causal mechanism.
+                </p>
+              </div>
+            </div>
 
-              <ul>
-                {diag.evidence.map((evidence, index) => (
-                  <li key={index}>
-                    <strong>{evidence.type || "Evidence"}:</strong>{" "}
-                    {evidence.detail}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </section>
-      )}
+            {rootCauseAnalysis.observed_facts?.length > 0 && (
+              <div className="insufficient-facts">
+                <strong>Observed Telemetry Findings:</strong>
+                <ul>
+                  {rootCauseAnalysis.observed_facts.map((fact, idx) => (
+                    <li key={idx}>{fact}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {rootCauseAnalysis.unverified_assumptions?.length > 0 && (
+              <div className="insufficient-assumptions">
+                <strong>Telemetry Gaps:</strong>
+                <ul>
+                  {rootCauseAnalysis.unverified_assumptions.map((assump, idx) => (
+                    <li key={idx}>{assump}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : rootCauseAnalysis?.hypotheses?.length > 0 ? (
+          <div className="rca-hypotheses-list">
+            {rootCauseAnalysis.hypotheses.map((hyp) => {
+              return (
+                <article
+                  key={`hyp-${hyp.rank}`}
+                  className={`rca-hypothesis-card rank-${hyp.rank}`}
+                >
+                  <div className="rca-card-topbar">
+                    <div className="rca-badges-left">
+                      <span className={`rca-rank-badge ${hyp.rank === 1 ? "top-rank" : ""}`}>
+                        RANK #{hyp.rank}
+                      </span>
+                      <span className={`rca-confidence-badge ${hyp.confidence.toLowerCase()}`}>
+                        {hyp.confidence}
+                      </span>
+                      <strong className="rca-service-tag">{hyp.suspected_service}</strong>
+                      {hyp.suspected_component && (
+                        <code className="rca-component-tag">{hyp.suspected_component}</code>
+                      )}
+                    </div>
+
+                    <div className="rca-rationale-tag">
+                      {hyp.ranking_rationale}
+                    </div>
+                  </div>
+
+                  <h4 className="rca-explanation-heading">{hyp.explanation}</h4>
+
+                  {/* Confidence Explanation */}
+                  <div className="rca-confidence-box">
+                    <strong>Confidence Justification:</strong> {hyp.confidence_explanation}
+                  </div>
+
+                  {/* Contradicting Evidence Banner */}
+                  {hyp.contradicting_evidence?.length > 0 && (
+                    <div className="rca-contradiction-box">
+                      <div className="contradiction-title">⚠️ Contradicting or Weakening Signals:</div>
+                      <ul>
+                        {hyp.contradicting_evidence.map((contra, cidx) => (
+                          <li key={cidx}>{contra}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* 3-Way Breakdown: Facts vs Inferences vs Assumptions */}
+                  <div className="rca-three-col-grid">
+                    <div className="rca-col facts">
+                      <div className="rca-col-title">Observed Facts</div>
+                      <ul>
+                        {hyp.observed_facts?.map((fact, fidx) => (
+                          <li key={fidx}>{fact}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div className="rca-col inferences">
+                      <div className="rca-col-title">Inferred Relationships</div>
+                      <ul>
+                        {hyp.inferred_relationships?.map((inf, iidx) => (
+                          <li key={iidx}>{inf}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div className="rca-col assumptions">
+                      <div className="rca-col-title">Unverified Assumptions</div>
+                      <ul>
+                        {hyp.unverified_assumptions?.map((ass, aidx) => (
+                          <li key={aidx}>{ass}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+
+                  {/* Supporting Evidence Items */}
+                  {hyp.supporting_evidence?.length > 0 && (
+                    <div className="rca-supporting-evidence-section">
+                      <div className="rca-section-title">
+                        Supporting Telemetry Evidence ({hyp.supporting_evidence.length})
+                      </div>
+                      <div className="rca-evidence-chips">
+                        {hyp.supporting_evidence.map((ev, eidx) => (
+                          <div key={ev.evidence_id || eidx} className="rca-evidence-chip">
+                            <span className="ev-icon">
+                              {ev.event_type === "deployment" ? "🚀" : ev.event_type === "error_log" ? "📋" : "⚡"}
+                            </span>
+                            <span className="ev-service">{ev.service}</span>
+                            <span className="ev-time">{formatTimestamp(ev.timestamp)}</span>
+                            <span className="ev-desc">{ev.description}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Recommended Verification Steps */}
+                  {hyp.recommended_verification_steps?.length > 0 && (
+                    <div className="rca-verification-steps">
+                      <div className="rca-section-title">Recommended Pre-Remediation Verification Steps:</div>
+                      <ol>
+                        {hyp.recommended_verification_steps.map((step, sidx) => (
+                          <li key={sidx}>{step}</li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+
+                  {/* Alternative Explanations */}
+                  {hyp.alternative_explanations?.length > 0 && (
+                    <div className="rca-alternatives">
+                      <span className="alt-label">Alternative Plausible Explanations:</span>
+                      <span> {hyp.alternative_explanations.join("; ")}</span>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        ) : diag ? (
+          /* Fallback to simple diagnosis if full RCA is pending */
+          <div className="timeline-empty">
+            <p><strong>Diagnosis:</strong> {diag.root_cause}</p>
+            <p className="muted">Click "Re-analyze Root Cause" to generate ranked hypotheses and evidence breakdown.</p>
+          </div>
+        ) : (
+          <div className="timeline-empty">
+            <p>No root-cause analysis generated yet.</p>
+            <p className="muted">Click "Re-analyze Root Cause" above to evaluate operational events and service dependencies.</p>
+          </div>
+        )}
+      </section>
 
       {/* Recommended action */}
 
