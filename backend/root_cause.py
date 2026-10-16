@@ -51,6 +51,19 @@ from .store import (
 
 logger = logging.getLogger("tracewell.root_cause")
 
+def _normalize_cached_values(value: Any) -> Any:
+    """Convert Firestore-native values into response-schema-friendly values."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _normalize_cached_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_cached_values(item) for item in value]
+    return value
+
+
 
 # -------------------------------------------------------------------
 # Pydantic Data Models
@@ -214,7 +227,7 @@ def analyze_root_cause_deterministic(
     incident_id = incident.get("id", "")
     incident_service = incident.get("service") or "unknown"
     incident_title = incident.get("title") or "Untitled Incident"
-    now_iso = server_timestamp()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     observed_facts: list[str] = []
     inferred_relationships: list[str] = []
@@ -611,7 +624,7 @@ async def analyze_root_cause_with_gemini(
     incident_id = incident.get("id", "")
     incident_service = incident.get("service") or "unknown"
     incident_title = incident.get("title") or "Untitled Incident"
-    now_iso = server_timestamp()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     # Prepare sanitized evidence payload (no bloat, strictly indexed by ID)
     evidence_payload = {
@@ -755,7 +768,7 @@ async def perform_root_cause_analysis(
         cached = get_root_cause_analysis(incident_id)
         if cached:
             try:
-                return RootCauseAnalysisResponse(**cached)
+                return RootCauseAnalysisResponse(**_normalize_cached_values(cached))
             except Exception as exc:
                 logger.warning("Failed to deserialize cached root-cause analysis: %s", exc)
 

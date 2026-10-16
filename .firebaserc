@@ -1,1 +1,7 @@
-{ "projects": { "default": "YOUR_GCP_PROJECT_ID" } }
+{
+  "projects": {
+    "default": "tracewell-incident-copilot"
+  },
+  "targets": {},
+  "etags": {}
+}

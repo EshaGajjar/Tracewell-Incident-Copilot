@@ -35,7 +35,6 @@ from .store import (
     get_investigation_graph,
     list_operational_events,
     save_investigation_graph,
-    server_timestamp,
 )
 
 logger = logging.getLogger("tracewell.causal_graph")
@@ -144,7 +143,18 @@ async def build_incident_causal_graph(
         cached = get_investigation_graph(incident_id)
         if cached:
             try:
-                resp = CausalGraphResponse(**cached)
+                def normalize_cached_graph(value: Any) -> Any:
+                    if isinstance(value, datetime):
+                        if value.tzinfo is None:
+                            value = value.replace(tzinfo=timezone.utc)
+                        return value.isoformat()
+                    if isinstance(value, dict):
+                        return {key: normalize_cached_graph(item) for key, item in value.items()}
+                    if isinstance(value, (list, tuple)):
+                        return [normalize_cached_graph(item) for item in value]
+                    return value
+
+                resp = CausalGraphResponse(**normalize_cached_graph(cached))
                 resp.is_cached = True
                 return resp
             except Exception as exc:
@@ -152,7 +162,23 @@ async def build_incident_causal_graph(
 
     incident_service = incident.get("service") or "unknown"
     incident_title = incident.get("title") or "Untitled Incident"
-    now_iso = server_timestamp()
+
+    def iso_timestamp(value: Any) -> str | None:
+        """Convert Firestore datetime values to the API's ISO-string contract."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.isoformat()
+        if hasattr(value, "isoformat") and callable(value.isoformat):
+            try:
+                return value.isoformat()
+            except (TypeError, ValueError):
+                pass
+        return str(value)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     # 1. Gather all operational data and analyses
     correlated_resp = correlate_events_for_incident(incident_id, persist=True)
@@ -183,7 +209,7 @@ async def build_incident_causal_graph(
             label=f"Service: {incident_service}",
             node_type="service",
             service=incident_service,
-            timestamp=incident.get("created_at"),
+            timestamp=iso_timestamp(incident.get("created_at")),
             metadata={
                 "is_incident_service": True,
                 "environment": incident.get("environment") or "production",
@@ -291,7 +317,7 @@ async def build_incident_causal_graph(
                     label=f"Deploy: {cev.revision or cev.service}",
                     node_type="deployment",
                     service=cev.service,
-                    timestamp=cev.timestamp,
+                    timestamp=iso_timestamp(cev.timestamp),
                     evidence_ids=[eid],
                     metadata={
                         "revision": cev.revision,
@@ -324,7 +350,7 @@ async def build_incident_causal_graph(
                     label=f"Error: {cev.description[:32]}...",
                     node_type="error_event",
                     service=cev.service,
-                    timestamp=cev.timestamp,
+                    timestamp=iso_timestamp(cev.timestamp),
                     evidence_ids=[eid],
                     metadata={
                         "severity": cev.severity or "ERROR",
@@ -362,7 +388,7 @@ async def build_incident_causal_graph(
                     label=f"Health: {cev.severity or 'CHECK'}",
                     node_type="health_event",
                     service=cev.service,
-                    timestamp=cev.timestamp,
+                    timestamp=iso_timestamp(cev.timestamp),
                     evidence_ids=[eid],
                     metadata={
                         "severity": cev.severity,
@@ -534,6 +560,7 @@ async def build_incident_causal_graph(
             etype = getattr(ev, "event_type", None) or (ev.get("event_type") if isinstance(ev, dict) else "unknown")
             esvc = getattr(ev, "service", None) or (ev.get("service") if isinstance(ev, dict) else incident_service)
             ets = getattr(ev, "timestamp", None) or (ev.get("timestamp") if isinstance(ev, dict) else now_iso)
+            ets = iso_timestamp(ets)
             edesc = getattr(ev, "description", None) or (ev.get("description") if isinstance(ev, dict) else "")
             epayload = getattr(ev, "payload", None) or (ev.get("payload") if isinstance(ev, dict) else {})
             evidence_details.append({

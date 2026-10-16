@@ -1,0 +1,249 @@
+{
+  "topology_services": [
+    "auth-cache",
+    "auth-service",
+    "firestore",
+    "notification-service",
+    "order-service",
+    "payment-api",
+    "payment-cache",
+    "payment-db"
+  ],
+  "scenarios": [
+    {
+      "id": "AUTH-01",
+      "name": "Auth cache returns stale signing keys",
+      "service": "auth-service",
+      "severity": "SEV2",
+      "title": "[AUTH-01] Token validation failures after key rotation",
+      "description": "Valid tokens fail validation after a signing-key rotation. auth-service cache lookup may be returning stale key material from auth-cache.",
+      "related_services": [
+        "auth-cache"
+      ],
+      "relationship_labels": [
+        "cache lookup",
+        "auth token validation"
+      ],
+      "events": [
+        {
+          "event_type": "deployment",
+          "service": "auth-service",
+          "description": "Auth service revision deployed with key-cache behavior change",
+          "minutes_after_start": 0
+        },
+        {
+          "event_type": "error",
+          "service": "auth-service",
+          "description": "Token validation failures increase for valid users",
+          "minutes_after_start": 2
+        },
+        {
+          "event_type": "dependency_signal",
+          "service": "auth-cache",
+          "description": "Cache hit rate remains high while key version is stale",
+          "minutes_after_start": 3
+        }
+      ],
+      "root_cause": "The auth-service is using stale signing-key material from auth-cache after key rotation; confirm with key-version/cache evidence before treating this as proven.",
+      "resolution": "Refresh the signing-key cache and validate key version propagation. Verify valid tokens succeed, invalid tokens remain rejected, and authentication error rate returns to baseline. Add a key-rotation integration test and cache-age alert.",
+      "graph_hypothesis": "auth-cache may contribute to auth-service token-validation failures; the configured dependency alone is not proof."
+    },
+    {
+      "id": "PAY-01",
+      "name": "Payment database connection exhaustion",
+      "service": "payment-api",
+      "severity": "SEV1",
+      "title": "[PAY-01] Payment requests fail while database pool is saturated",
+      "description": "payment-api returns 500/timeouts. payment-db connection utilization is at its limit and payment-cache remains responsive.",
+      "related_services": [
+        "payment-db",
+        "payment-cache"
+      ],
+      "relationship_labels": [
+        "database connection",
+        "cache lookup"
+      ],
+      "events": [
+        {
+          "event_type": "metric_alert",
+          "service": "payment-api",
+          "description": "Payment 5xx rate and latency increase",
+          "minutes_after_start": 0
+        },
+        {
+          "event_type": "database_signal",
+          "service": "payment-db",
+          "description": "Active database connections reach configured pool limit",
+          "minutes_after_start": 1
+        },
+        {
+          "event_type": "health_check",
+          "service": "payment-cache",
+          "description": "Payment cache remains healthy during database saturation",
+          "minutes_after_start": 2
+        }
+      ],
+      "root_cause": "payment-api database operations are exhausting the payment-db connection pool; validate with pool metrics and slow-query evidence.",
+      "resolution": "Identify and remediate slow or leaked database connections, then verify pool utilization falls below the alert threshold, payment requests succeed, and 5xx/latency return to baseline. Add pool saturation alerting and a peak-load regression test.",
+      "graph_hypothesis": "payment-db is a candidate contributor to payment-api errors; verify with connection and query evidence."
+    },
+    {
+      "id": "ORDER-01",
+      "name": "Order flow fails on auth dependency",
+      "service": "order-service",
+      "severity": "SEV2",
+      "title": "[ORDER-01] Order submission fails during auth degradation",
+      "description": "order-service cannot complete order submission when auth-service token validation starts failing. A configured auth token validation edge connects the services.",
+      "related_services": [
+        "auth-service",
+        "auth-cache"
+      ],
+      "relationship_labels": [
+        "auth token validation",
+        "cache lookup"
+      ],
+      "events": [
+        {
+          "event_type": "error",
+          "service": "auth-service",
+          "description": "Authentication errors rise",
+          "minutes_after_start": 0
+        },
+        {
+          "event_type": "error",
+          "service": "order-service",
+          "description": "Order submission returns authorization errors",
+          "minutes_after_start": 1
+        },
+        {
+          "event_type": "customer_impact",
+          "service": "order-service",
+          "description": "Order completion rate drops",
+          "minutes_after_start": 3
+        }
+      ],
+      "root_cause": "Order submission is affected by authentication failures in auth-service; investigate auth-service and auth-cache evidence before confirming the initiating fault.",
+      "resolution": "Restore correct token validation in auth-service, validate the auth-cache key version, then run an end-to-end order submission and verify order success rate recovers. Add an order-to-auth integration test and downstream-impact alert.",
+      "graph_hypothesis": "auth-service degradation may propagate to order-service along the configured dependency."
+    },
+    {
+      "id": "NOTIFY-01",
+      "name": "Notification worker backlog",
+      "service": "notification-service",
+      "severity": "SEV3",
+      "title": "[NOTIFY-01] Notification delivery backlog grows",
+      "description": "notification-service delivery lag increases. Inspect Pub/Sub event delivery and downstream dependency health before attributing cause.",
+      "related_services": [
+        "firestore",
+        "order-service"
+      ],
+      "relationship_labels": [
+        "pubsub event",
+        "database connection"
+      ],
+      "events": [
+        {
+          "event_type": "metric_alert",
+          "service": "notification-service",
+          "description": "Queue age exceeds service objective",
+          "minutes_after_start": 0
+        },
+        {
+          "event_type": "dependency_signal",
+          "service": "order-service",
+          "description": "Order event production rate remains elevated",
+          "minutes_after_start": 1
+        },
+        {
+          "event_type": "database_signal",
+          "service": "firestore",
+          "description": "Notification state writes show increased latency",
+          "minutes_after_start": 2
+        }
+      ],
+      "root_cause": "Notification delivery is delayed; candidate causes include consumer capacity, event delivery, or slow notification-state writes. Evidence is needed to distinguish them.",
+      "resolution": "Inspect consumer lag, retry/dead-letter counts, and Firestore write latency. Restore consumer capacity or remediate the verified bottleneck, then confirm queue age drains and a test notification is delivered. Add queue-age and retry alerts.",
+      "graph_hypothesis": "The graph should show configured relationships but must not infer a causal edge without supporting evidence."
+    },
+    {
+      "id": "PAY-02",
+      "name": "Payment cache stale response",
+      "service": "payment-api",
+      "severity": "SEV2",
+      "title": "[PAY-02] Payment API returns stale pricing state",
+      "description": "payment-api responses appear inconsistent with the latest order state. payment-cache is a candidate source of stale values; payment-db is the source to compare against.",
+      "related_services": [
+        "payment-cache",
+        "payment-db"
+      ],
+      "relationship_labels": [
+        "cache lookup",
+        "database connection"
+      ],
+      "events": [
+        {
+          "event_type": "error",
+          "service": "payment-api",
+          "description": "Pricing mismatch reported",
+          "minutes_after_start": 0
+        },
+        {
+          "event_type": "dependency_signal",
+          "service": "payment-cache",
+          "description": "Cache entries exceed expected freshness window",
+          "minutes_after_start": 1
+        },
+        {
+          "event_type": "database_signal",
+          "service": "payment-db",
+          "description": "Persisted order state differs from cached state",
+          "minutes_after_start": 2
+        }
+      ],
+      "root_cause": "payment-api may be serving stale cached state from payment-cache; confirm against persisted payment-db state and cache freshness evidence.",
+      "resolution": "Invalidate or refresh the affected cache entries, compare API responses with persisted payment-db records, and verify repeated reads return consistent values. Add cache-age metrics and a stale-read regression test.",
+      "graph_hypothesis": "payment-cache is a candidate contributor; configured cache lookup alone does not prove the failure source."
+    },
+    {
+      "id": "GRAPH-01",
+      "name": "Ambiguous concurrent signals",
+      "service": "auth-service",
+      "severity": "SEV3",
+      "title": "[GRAPH-01] Multiple dependency signals without proven causation",
+      "description": "auth-service and notification-service emit errors within the same window, while firestore latency is elevated. The scenario intentionally lacks direct evidence linking these signals.",
+      "related_services": [
+        "auth-cache",
+        "firestore",
+        "notification-service"
+      ],
+      "relationship_labels": [
+        "cache lookup",
+        "database connection",
+        "pubsub event"
+      ],
+      "events": [
+        {
+          "event_type": "error",
+          "service": "auth-service",
+          "description": "Authentication error rate increases",
+          "minutes_after_start": 0
+        },
+        {
+          "event_type": "metric_alert",
+          "service": "firestore",
+          "description": "Write latency is elevated",
+          "minutes_after_start": 1
+        },
+        {
+          "event_type": "error",
+          "service": "notification-service",
+          "description": "Notification delivery errors increase",
+          "minutes_after_start": 1
+        }
+      ],
+      "root_cause": "Insufficient evidence to determine a single root cause. The signals may be correlated or independent.",
+      "resolution": "Do not apply a broad remediation based on timing alone. Collect request traces, cache key-version evidence, Firestore latency breakdowns, and event-delivery metrics. Resolve the verified fault and rerun service-specific health checks.",
+      "graph_hypothesis": "Acceptance case: graph must distinguish configured dependency edges from evidence-supported or inferred edges."
+    }
+  ]
+}
