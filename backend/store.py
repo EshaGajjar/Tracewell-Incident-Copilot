@@ -168,11 +168,16 @@ def get_incident(incident_id: str) -> dict[str, Any] | None:
     if db is None:
         with _lock, _connect_local() as conn:
             row = conn.execute(
-                "SELECT payload FROM incidents WHERE id = ?",
+                "SELECT id, payload, created_at FROM incidents WHERE id = ?",
                 (incident_id,),
             ).fetchone()
 
-            return json.loads(row["payload"]) if row else None
+            if not row:
+                return None
+            item = json.loads(row["payload"])
+            if not item.get("created_at") and row["created_at"]:
+                item["created_at"] = row["created_at"]
+            return item
 
     snap = db.collection("incidents").document(incident_id).get()
 
@@ -190,7 +195,7 @@ def update_incident(
     if db is None:
         with _lock, _connect_local() as conn:
             row = conn.execute(
-                "SELECT payload FROM incidents WHERE id = ?",
+                "SELECT id, payload, created_at FROM incidents WHERE id = ?",
                 (incident_id,),
             ).fetchone()
 
@@ -202,10 +207,13 @@ def update_incident(
             current = json.loads(row["payload"]) if row else {"id": incident_id}
             current.update(fields)
 
+            # Preserve authoritative creation timestamp; do not replace missing timestamps with current time
             created_at = str(
                 current.get("created_at")
-                or datetime.now(timezone.utc).isoformat()
+                or (row["created_at"] if row and row["created_at"] else "")
             )
+            if created_at and "created_at" not in current:
+                current["created_at"] = created_at
 
             conn.execute(
                 """
@@ -258,6 +266,7 @@ def append_step(
     tool: str,
     input_data: Any,
     output_data: Any,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     db = get_db()
 
@@ -280,6 +289,7 @@ def append_step(
                 "tool": tool,
                 "input": input_data,
                 "output": output_data,
+                "execution_id": execution_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -316,17 +326,18 @@ def append_step(
             else 0
         )
 
-        transaction.set(
-            ref,
-            {
-                "index": idx,
-                "type": step_type,
-                "tool": tool,
-                "input": input_data,
-                "output": output_data,
-                "ts": _firestore_module.SERVER_TIMESTAMP,
-            },
-        )
+        step_data = {
+            "index": idx,
+            "type": step_type,
+            "tool": tool,
+            "input": input_data,
+            "output": output_data,
+            "ts": _firestore_module.SERVER_TIMESTAMP,
+        }
+        if execution_id:
+            step_data["execution_id"] = execution_id
+
+        transaction.set(ref, step_data)
 
         transaction.set(
             incident_ref,
@@ -338,13 +349,16 @@ def append_step(
 
     idx = _write(db.transaction())
 
-    return {
+    res = {
         "index": idx,
         "type": step_type,
         "tool": tool,
         "input": input_data,
         "output": output_data,
     }
+    if execution_id:
+        res["execution_id"] = execution_id
+    return res
 
 
 def list_local_steps(incident_id: str) -> list[dict[str, Any]]:
@@ -386,13 +400,18 @@ def list_incidents() -> list[dict[str, Any]]:
         with _lock, _connect_local() as conn:
             rows = conn.execute(
                 """
-                SELECT payload
+                SELECT id, payload, created_at
                 FROM incidents
                 ORDER BY created_at DESC, rowid DESC
                 """
             ).fetchall()
 
-            items = [json.loads(row["payload"]) for row in rows]
+            items = []
+            for row in rows:
+                item = json.loads(row["payload"])
+                if not item.get("created_at") and row["created_at"]:
+                    item["created_at"] = row["created_at"]
+                items.append(item)
     else:
         items = [
             {"id": snap.id, **(snap.to_dict() or {})}
@@ -841,7 +860,14 @@ def list_dependency_relationships(
                 params.append(target)
             query += " ORDER BY source_service ASC, target_service ASC"
             rows = conn.execute(query, tuple(params)).fetchall()
-            items = [json.loads(row["payload"]) for row in rows]
+            items = []
+            for row in rows:
+                item = json.loads(row["payload"])
+                if "source" not in item:
+                    item["source"] = item.get("source_service", "")
+                if "target" not in item:
+                    item["target"] = item.get("target_service", "")
+                items.append(item)
             if environment and environment != "all":
                 items = [i for i in items if i.get("environment") == environment]
             return items

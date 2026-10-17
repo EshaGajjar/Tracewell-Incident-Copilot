@@ -189,16 +189,31 @@ async def build_incident_causal_graph(
     nodes_map: dict[str, CausalGraphNode] = {}
     edges_map: dict[str, CausalGraphEdge] = {}
     evidence_refs: set[str] = set()
+    seen_entity_keys: set[tuple[str, str]] = set()
+    seen_edge_triplets: set[tuple[str, str, str]] = set()
 
-    # Helper to add node safely
+    # Helper to add node safely and deduplicate visual nodes by stable entity ID
     def add_node(node: CausalGraphNode) -> None:
-        if node.id not in nodes_map:
-            nodes_map[node.id] = node
+        if node.id in nodes_map:
+            return
+        entity_key = (node.node_type, node.entity_id)
+        if node.entity_id and entity_key in seen_entity_keys:
+            return
+        if node.entity_id:
+            seen_entity_keys.add(entity_key)
+        nodes_map[node.id] = node
 
-    # Helper to add edge safely
+    # Helper to add edge safely, ensuring both endpoints exist and avoiding duplicate edges
     def add_edge(edge: CausalGraphEdge) -> None:
-        if edge.id not in edges_map:
-            edges_map[edge.id] = edge
+        if edge.id in edges_map:
+            return
+        if edge.source not in nodes_map or edge.target not in nodes_map:
+            return
+        triplet = (edge.source, edge.target, edge.relationship_type)
+        if triplet in seen_edge_triplets:
+            return
+        seen_edge_triplets.add(triplet)
+        edges_map[edge.id] = edge
 
     # 2. Add Primary Incident Service Node
     primary_svc_node_id = f"node_svc_{incident_service}"

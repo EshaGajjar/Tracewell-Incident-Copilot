@@ -1,22 +1,25 @@
 import { useState } from "react";
 import { api } from "../firebase.js";
+import { PlusIcon, SearchIcon, AlertCircleIcon } from "./Icons.jsx";
 
-// Quick-fill buttons for the demo scenarios (match the bad revisions A deploys).
 const SCENARIOS = {
   "Bad DATABASE_URL": {
     title: "Payments failing with 500 errors",
     service: "payment-api",
     description: "Customers report checkout failures. /pay returns 500 since the last deploy.",
+    severity: "SEV1",
   },
   "Bad Redis config": {
-    title: "Payments very slow",
+    title: "Payments experiencing high latency",
     service: "payment-api",
-    description: "/pay takes over 5 seconds and sometimes times out.",
+    description: "/pay takes over 5 seconds and sometimes times out due to Redis cache unreachable.",
+    severity: "SEV2",
   },
   "Missing env var": {
-    title: "New payment-api revision not serving",
-    service: "payment-api",
-    description: "The latest revision fails to start and requests are erroring.",
+    title: "Auth service failing container startup",
+    service: "auth-service",
+    description: "The latest revision fails to start and requests are erroring due to missing JWT secret env var.",
+    severity: "SEV2",
   },
 };
 
@@ -39,9 +42,9 @@ export default function ReportForm({ onCreated }) {
   const [busyAction, setBusyAction] = useState("");
   const [stage, setStage] = useState("");
   const [error, setError] = useState("");
-  const set = (k) => (e) => setForm((previous) => ({ ...previous, [k]: e.target.value }));
 
-  // The ticket is written to Firestore first. Copilot investigation runs only after that succeeds.
+  const set = (k) => (e) => setForm((prev) => ({ ...prev, [k]: e.target.value }));
+
   async function submit(askCopilot) {
     if (!form.title.trim() || !form.description.trim()) {
       setError("Title and description are required.");
@@ -49,12 +52,10 @@ export default function ReportForm({ onCreated }) {
     }
 
     setBusyAction(askCopilot ? "investigate" : "create");
-    setStage("Saving incident to the Tracewell store…");
+    setStage("Saving incident to Tracewell store…");
     setError("");
 
     try {
-      console.info("[Tracewell] submit started", { askCopilot });
-      // Use the API for both creation and investigation so they share one data store.
       const created = await withTimeout(
         api("/incidents", {
           title: form.title.trim(),
@@ -63,26 +64,18 @@ export default function ReportForm({ onCreated }) {
           description: form.description.trim(),
         }, { timeoutMs: 20000 }),
         22000,
-        "Timed out while creating the incident through the API. Check the backend terminal."
+        "Timed out while creating the incident. Check the backend server."
       );
       const incidentId = created.incident_id;
-      console.info("[Tracewell] API created incident", incidentId);
-
-      if (files.length) {
-        setStage("Local attachment upload is not enabled yet; continuing without attachments.");
-      }
 
       if (askCopilot) {
-        setStage("Running Copilot investigation…");
-        console.info("[Tracewell] calling /investigate", incidentId);
+        setStage("Running automated Copilot investigation…");
         await api("/investigate", { incident_id: incidentId }, { timeoutMs: 60000 });
-        console.info("[Tracewell] investigation request completed", incidentId);
       }
 
       onCreated(incidentId);
     } catch (err) {
-      console.error("[Tracewell] submit failed", err);
-      setError(err?.message || "Could not create the incident. Check the browser console and backend logs.");
+      setError(err?.message || "Could not create the incident.");
       setStage("");
     } finally {
       setBusyAction("");
@@ -90,57 +83,119 @@ export default function ReportForm({ onCreated }) {
   }
 
   return (
-    <div className="card">
-      <div className="quick">
-        {Object.entries(SCENARIOS).map(([label, scenario]) => (
+    <div className="card" style={{ maxWidth: "720px" }}>
+      <div style={{ marginBottom: "16px" }}>
+        <span className="eyebrow" style={{ marginBottom: "6px" }}>QUICK TEMPLATES</span>
+        <div className="quick-scenarios">
+          {Object.entries(SCENARIOS).map(([label, sc]) => (
+            <button
+              type="button"
+              key={label}
+              className="scenario-chip"
+              disabled={Boolean(busyAction)}
+              onClick={() => setForm((prev) => ({ ...prev, ...sc }))}
+            >
+              + {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="form-grid">
+        <div className="form-group">
+          <label>Incident Title *</label>
+          <input
+            value={form.title}
+            onChange={set("title")}
+            placeholder="e.g. Elevated 500 error rates on payment checkout"
+            disabled={Boolean(busyAction)}
+          />
+        </div>
+
+        <div className="form-row-2">
+          <div className="form-group">
+            <label>Affected Service *</label>
+            <input
+              className="text-input"
+              value={form.service}
+              onChange={set("service")}
+              placeholder="e.g. payment-api"
+              disabled={Boolean(busyAction)}
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Severity Level</label>
+            <select
+              className="select-input"
+              value={form.severity}
+              onChange={set("severity")}
+              disabled={Boolean(busyAction)}
+            >
+              <option value="SEV1">SEV1 (Critical Outage)</option>
+              <option value="SEV2">SEV2 (Major Degradation)</option>
+              <option value="SEV3">SEV3 (Moderate Issue)</option>
+              <option value="SEV4">SEV4 (Minor / Low)</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label>Incident Description & Symptoms *</label>
+          <textarea
+            rows={4}
+            value={form.description}
+            onChange={set("description")}
+            placeholder="Describe observed errors, timing, customer impact, or related deployment revisions…"
+            disabled={Boolean(busyAction)}
+          />
+        </div>
+
+        <div className="form-group">
+          <label>Screenshots / Logs Attachment (Optional)</label>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            disabled={Boolean(busyAction)}
+            onChange={(e) => setFiles(Array.from(e.target.files || []))}
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
           <button
             type="button"
-            key={label}
+            className="primary-button"
             disabled={Boolean(busyAction)}
-            onClick={() => setForm((previous) => ({ ...previous, ...scenario }))}
+            onClick={() => submit(true)}
           >
-            {label}
+            <SearchIcon size={14} />
+            <span>
+              {busyAction === "investigate"
+                ? "Investigating with Copilot…"
+                : "Create & Investigate with Copilot"}
+            </span>
           </button>
-        ))}
+
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={Boolean(busyAction)}
+            onClick={() => submit(false)}
+          >
+            <PlusIcon size={14} />
+            <span>{busyAction === "create" ? "Creating…" : "Create Ticket Only"}</span>
+          </button>
+        </div>
+
+        {stage && <p className="muted" role="status" style={{ marginTop: "6px" }}>{stage}</p>}
+        {error && (
+          <div className="notice error-notice" role="alert" style={{ marginTop: "8px" }}>
+            <AlertCircleIcon size={15} />
+            <span>{error}</span>
+          </div>
+        )}
       </div>
-      <label>
-        Title
-        <input value={form.title} onChange={set("title")} disabled={Boolean(busyAction)} />
-      </label>
-      <label>
-        Service
-        <input value={form.service} onChange={set("service")} disabled={Boolean(busyAction)} />
-      </label>
-      <label>
-        Severity
-        <select value={form.severity} onChange={set("severity")} disabled={Boolean(busyAction)}>
-          {["SEV1", "SEV2", "SEV3", "SEV4"].map((severity) => (
-            <option key={severity}>{severity}</option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Description
-        <textarea rows={4} value={form.description} onChange={set("description")} disabled={Boolean(busyAction)} />
-      </label>
-      <label>
-        Screenshots (optional; local upload is not enabled)
-        <input
-          type="file"
-          accept="image/*"
-          multiple
-          disabled={Boolean(busyAction)}
-          onChange={(event) => setFiles(Array.from(event.target.files || []))}
-        />
-      </label>
-      <button disabled={Boolean(busyAction)} onClick={() => submit(true)}>
-        {busyAction === "investigate" ? "Working…" : "Create and investigate with Copilot"}
-      </button>{" "}
-      <button disabled={Boolean(busyAction)} className="secondary" onClick={() => submit(false)}>
-        {busyAction === "create" ? "Creating…" : "Create ticket only"}
-      </button>
-      {stage && <p className="muted" role="status">{stage}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
     </div>
   );
 }

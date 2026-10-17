@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
-DATA = json.loads((Path(__file__).parents[1] / "scenarios.json").read_text())
+scenarios_path = Path(__file__).parent / "scenarios.json"
+if not scenarios_path.exists():
+    scenarios_path = Path(__file__).parents[1] / "scenarios.json"
+DATA = json.loads(scenarios_path.read_text())
 
 def test_scenarios_only_reference_known_topology_services():
     known = set(DATA["topology_services"])

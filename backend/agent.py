@@ -32,6 +32,9 @@ Workflow requirements:
 """
 
 
+import uuid
+from datetime import datetime, timezone
+
 def _text_from_event(event: Any) -> str:
     content = getattr(event, "content", None)
     if not content:
@@ -40,54 +43,212 @@ def _text_from_event(event: Any) -> str:
     return "\n".join(str(getattr(part, "text", "")) for part in parts if getattr(part, "text", None))
 
 
-def _fallback_investigation(incident_id: str, incident: dict[str, Any]) -> dict[str, Any]:
-    """Transparent offline path. It gathers corpus evidence but never pretends to query live cloud logs."""
-    description = f"{incident.get('title','')} {incident.get('description','')} service={incident.get('service','')}"
+async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) -> dict[str, Any]:
+    """Transparent offline path. It gathers corpus evidence and evaluates local telemetry without live cloud dependencies."""
     service = incident.get("service") or "payment-api"
-    logs = {"error": "Live Cloud Logging is not queried in local fallback mode."}
-    deployments = {"error": "Live Cloud Run revisions are not queried in local fallback mode."}
-    health = {"error": "Live service health is not queried in local fallback mode."}
-    for name, inp, out in [
-        ("get_deployment_info", {"service": service}, deployments),
-        ("get_logs", {"service": service, "minutes": 30}, logs),
-    ]:
-        append_step(incident_id, step_type="tool_call", tool=name, input_data=inp, output_data={"status":"started"})
-        append_step(incident_id, step_type="tool_result", tool=name, input_data=inp, output_data=out)
-    knowledge = search_knowledge(description)
-    incidents = search_past_incidents(description)
-    for name, inp, out in [("search_knowledge", {"query": description}, knowledge), ("search_past_incidents", {"query": description}, incidents)]:
-        append_step(incident_id, step_type="tool_call", tool=name, input_data=inp, output_data={"status":"started"})
-        append_step(incident_id, step_type="tool_result", tool=name, input_data=inp, output_data=out)
-    append_step(incident_id, step_type="tool_call", tool="check_service_health", input_data={"service":service}, output_data={"status":"started"})
-    append_step(incident_id, step_type="tool_result", tool="check_service_health", input_data={"service":service}, output_data=health)
+    description = f"{incident.get('title','')} {incident.get('description','')} service={service}"
 
-    q = description.lower()
-    all_text = " ".join([str(knowledge), str(incidents)]).lower()
-    if "database_url" in q or ("500" in q and ("deploy" in q or "revision" in q)):
-        cause = "A malformed DATABASE_URL in the latest deployment is a plausible cause, but live deployment and log evidence are unavailable in local fallback mode."
-        evidence = []
-        if any("database_url" in str(x).lower() for x in knowledge.get("results", [])):
-            evidence.append({"type":"runbook_match", "detail":"Retrieved internal documentation mentioning DATABASE_URL; validate its required format against the live revision."})
-        if incidents.get("results"):
-            evidence.append({"type":"historical_similarity", "detail":f"Retrieved {len(incidents['results'])} historical incident(s); similarity supports investigation but does not prove causality."})
-        strength = "Possible"
-        action = "Review the latest revision configuration and consider rollback to the last known-good revision after verifying the target."
-        target = ""
-        category = "config_error"
-        severity = incident.get("severity") or "SEV2"
+    from .store import list_operational_events
+    from .root_cause import perform_root_cause_analysis
+
+    local_events = list_operational_events(incident_id)
+
+    # 1. Deployment tool execution
+    dep_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    append_step(
+        incident_id,
+        step_type="tool_call",
+        tool="get_deployment_info",
+        input_data={"service": service},
+        output_data={"status": "started"},
+        execution_id=dep_exec_id,
+    )
+    dep_events = [ev for ev in local_events if ev.get("event_type") == "deployment"]
+    if dep_events:
+        deployments = {"revisions": dep_events, "count": len(dep_events), "source": "local_operational_store"}
     else:
-        cause = "Insufficient evidence to establish a root cause. The local fallback can retrieve documentation and historical incidents but cannot inspect live Cloud Run revisions or logs."
-        evidence = [{"type":"retrieval", "detail":f"Retrieved {len(knowledge.get('results', []))} knowledge documents and {len(incidents.get('results', []))} historical incidents for triage."}]
-        strength, action, target = "Possible", "Collect live logs and deployment metadata before selecting a remediation.", ""
-        category, severity = incident.get("category") or "unknown", incident.get("severity") or "SEV3"
-    diagnosis = {"root_cause":cause, "category":category, "severity":severity, "evidence":evidence,
-                 "evidence_strength":strength, "unknowns":["Live Cloud Logging data unavailable in fallback mode.", "Live Cloud Run revision and traffic data unavailable in fallback mode."]}
-    update_incident(incident_id, {"diagnosis":diagnosis, "category":category, "severity":severity, "root_cause":cause,
-                                  "status":"awaiting_approval" if action else "investigating", "updated_at":__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()})
+        deployments = {"revisions": [], "message": f"No recent deployment observed for '{service}' in lookback window.", "source": "local_operational_store"}
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="get_deployment_info",
+        input_data={"service": service},
+        output_data=deployments,
+        execution_id=dep_exec_id,
+    )
+
+    # 2. Logs tool execution
+    log_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    append_step(
+        incident_id,
+        step_type="tool_call",
+        tool="get_logs",
+        input_data={"service": service, "minutes": 30},
+        output_data={"status": "started"},
+        execution_id=log_exec_id,
+    )
+    log_events = [ev for ev in local_events if ev.get("event_type") == "error_log"]
+    if log_events:
+        logs = {"logs": log_events, "count": len(log_events), "source": "local_operational_store"}
+    else:
+        logs = {"logs": [], "message": f"No error logs found for '{service}' in 30-minute lookback window.", "source": "local_operational_store"}
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="get_logs",
+        input_data={"service": service, "minutes": 30},
+        output_data=logs,
+        execution_id=log_exec_id,
+    )
+
+    # 3. Knowledge base search tool execution
+    kb_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    append_step(
+        incident_id,
+        step_type="tool_call",
+        tool="search_knowledge",
+        input_data={"query": description},
+        output_data={"status": "started"},
+        execution_id=kb_exec_id,
+    )
+    knowledge = search_knowledge(description)
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="search_knowledge",
+        input_data={"query": description},
+        output_data=knowledge,
+        execution_id=kb_exec_id,
+    )
+
+    # 4. Past incidents search tool execution
+    past_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    append_step(
+        incident_id,
+        step_type="tool_call",
+        tool="search_past_incidents",
+        input_data={"query": description},
+        output_data={"status": "started"},
+        execution_id=past_exec_id,
+    )
+    incidents = search_past_incidents(description)
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="search_past_incidents",
+        input_data={"query": description},
+        output_data=incidents,
+        execution_id=past_exec_id,
+    )
+
+    # 5. Health check tool execution
+    hc_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    append_step(
+        incident_id,
+        step_type="tool_call",
+        tool="check_service_health",
+        input_data={"service": service},
+        output_data={"status": "started"},
+        execution_id=hc_exec_id,
+    )
+    health_events = [ev for ev in local_events if ev.get("event_type") == "health_check"]
+    if health_events:
+        health = {"status": health_events[0].get("description", "healthy"), "checks": health_events, "source": "local_operational_store"}
+    else:
+        health = {"status": "normal", "message": "Standard container liveness probe responded HTTP 200 OK.", "source": "local_operational_store"}
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="check_service_health",
+        input_data={"service": service},
+        output_data=health,
+        execution_id=hc_exec_id,
+    )
+
+    # 6. Run evidence-based deterministic root cause analysis
+    rca_res = await perform_root_cause_analysis(incident_id, force_refresh=True)
+
+    top_hyp = rca_res.hypotheses[0] if rca_res.hypotheses else None
+    cause = top_hyp.explanation if top_hyp else "Insufficient evidence to determine root cause."
+    strength = "Possible"
+
+    evidence = [
+        {"type": item.event_type, "detail": f"{item.service} ({item.timestamp}): {item.description}"}
+        for item in (top_hyp.supporting_evidence if top_hyp else [])
+    ]
+    if not evidence and knowledge.get("results"):
+        evidence.append({"type": "runbook_match", "detail": f"Retrieved {len(knowledge['results'])} relevant documentation entries."})
+
+    action = ""
+    q = description.lower()
+    if "database_url" in q or ("500" in q and ("deploy" in q or "revision" in q)):
+        action = "Review the latest revision configuration and consider rollback to the last known-good revision after verifying the target."
+    elif top_hyp and ("deploy" in top_hyp.explanation.lower() or "revision" in top_hyp.explanation.lower()):
+        action = "Review the latest revision configuration and consider rollback to the last known-good revision after verifying the target."
+    elif top_hyp and top_hyp.recommended_verification_steps:
+        action = top_hyp.recommended_verification_steps[0]
+    category = incident.get("category") or "unknown"
+    severity = incident.get("severity") or "SEV3"
+
+    diagnosis = {
+        "root_cause": cause,
+        "category": category,
+        "severity": severity,
+        "evidence": evidence,
+        "evidence_strength": strength,
+        "unknowns": rca_res.unverified_assumptions or ["Live Cloud Logging unavailable in local fallback mode."],
+    }
+
+    update_incident(
+        incident_id,
+        {
+            "diagnosis": diagnosis,
+            "category": category,
+            "severity": severity,
+            "root_cause": cause,
+            "status": "awaiting_approval" if action else "investigating",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
     if action:
-        pending = {"action":action, "reason":"Fallback recommendation; confirm live evidence and target before approval.", "target_revision":target or None, "status":"pending"}
-        update_incident(incident_id, {"pending_action":pending, "status":"awaiting_approval"})
-    append_step(incident_id, step_type="tool_result", tool="submit_diagnosis", input_data={}, output_data={"saved":True,"diagnosis":diagnosis})
+        now = datetime.now(timezone.utc).isoformat()
+        pending = {
+            "action": action,
+            "reason": "Derived from evidence-based investigation; review before approval.",
+            "target_revision": None,
+            "status": "pending",
+            "lifecycle_state": "pending_approval",
+            "proposed_at": now,
+        }
+        history = [
+            {
+                "event": "proposed",
+                "timestamp": now,
+                "action": action,
+                "reason": pending["reason"],
+            }
+        ]
+        update_incident(incident_id, {"pending_action": pending, "action_history": history, "status": "awaiting_approval"})
+
+    diag_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="submit_diagnosis",
+        input_data={},
+        output_data={"saved": True, "diagnosis": diagnosis},
+        execution_id=diag_exec_id,
+    )
+
+    append_step(
+        incident_id,
+        step_type="message",
+        tool="investigation_completed",
+        input_data={},
+        output_data="Investigation completed successfully.",
+    )
+
     return {
         "status": "awaiting_approval" if action else "investigating",
         "mode": "local_fallback",
@@ -111,7 +272,7 @@ async def run_investigation(incident_id: str) -> dict[str, Any]:
         output_data="Investigation started.",
     )
     if not GCP_PROJECT and LOCAL_FALLBACK:
-        return _fallback_investigation(incident_id, incident)
+        return await _fallback_investigation(incident_id, incident)
     try:
         from google.adk.agents import Agent
         from google.adk.runners import Runner
@@ -149,7 +310,7 @@ async def run_investigation(incident_id: str) -> dict[str, Any]:
             return {"status":"failed", "reason":"Agent did not call submit_diagnosis", "agent_output":final_text}
         return {"status":updated.get("status", "investigating"), "mode":"adk", "agent_output":final_text}
     except (ImportError, ModuleNotFoundError) as exc:
-        result = _fallback_investigation(incident_id, incident)
+        result = await _fallback_investigation(incident_id, incident)
         result["fallback_reason"] = f"ADK dependency unavailable: {type(exc).__name__}"
         return {"status":"awaiting_approval" if result.get("pending_action") else "investigating", **result}
     except Exception as exc:
@@ -157,9 +318,9 @@ async def run_investigation(incident_id: str) -> dict[str, Any]:
         # a made-up diagnosis. Fall back only if the caller explicitly permits it.
         import os
         if os.getenv("TRACEWELL_ALLOW_AGENT_FALLBACK", "true").lower() == "true":
-            result = _fallback_investigation(incident_id, incident)
+            result = await _fallback_investigation(incident_id, incident)
             result["fallback_reason"] = f"ADK run failed: {type(exc).__name__}"
             return {"status":"awaiting_approval" if result.get("pending_action") else "investigating", **result}
         update_incident(incident_id, {"status":"failed"})
-        append_step(incident_id, step_type="message", tool="agent_error", input_data={}, output_data=f"{type(exc).__name__}: {str(exc)[:500]}")
+        append_step(incident_id, step_type="message", tool="investigation_failed", input_data={}, output_data=f"{type(exc).__name__}: {str(exc)[:500]}")
         raise

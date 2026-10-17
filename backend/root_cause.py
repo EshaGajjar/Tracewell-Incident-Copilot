@@ -360,16 +360,28 @@ def analyze_root_cause_deterministic(
         )
 
         has_contradiction = bool(contradicting_signals)
-        confidence = (
-            ConfidenceLevel.CONFIRMED.value
-            if (len(direct_errors) >= 2 and not has_contradiction and latest_dep.revision)
-            else ConfidenceLevel.PROBABLE.value
-        )
-        conf_expl = (
-            f"Assigned '{confidence}' because direct deployment evidence ({latest_dep.event_id}) "
-            f"is corroborated by {len(direct_errors)} direct error log(s) on the affected service."
-            + (" However, conflicting healthy signals were observed." if has_contradiction else "")
-        )
+        is_missing_revision = not bool(latest_dep.revision)
+
+        if is_missing_revision:
+            confidence = ConfidenceLevel.POSSIBLE.value
+            conf_expl = (
+                f"Assigned 'Possible' due to explicit uncertainty: deployment metadata is incomplete "
+                f"(missing revision identifier), so deployment attribution cannot be confirmed."
+            )
+            unverified_assumptions.append(
+                "Deployment metadata lacks revision and commit identifiers; attribution to this change is uncertain."
+            )
+        else:
+            confidence = (
+                ConfidenceLevel.CONFIRMED.value
+                if (len(direct_errors) >= 2 and not has_contradiction and latest_dep.revision)
+                else ConfidenceLevel.PROBABLE.value
+            )
+            conf_expl = (
+                f"Assigned '{confidence}' because direct deployment evidence ({latest_dep.event_id}) "
+                f"is corroborated by {len(direct_errors)} direct error log(s) on the affected service."
+                + (" However, conflicting healthy signals were observed." if has_contradiction else "")
+            )
 
         hypotheses.append(
             RootCauseHypothesis(
@@ -452,11 +464,29 @@ def analyze_root_cause_deterministic(
 
     # Hypothesis C: Upstream Dependency Failure (e.g. database, auth)
     if upstream_events:
-        for uev in upstream_events[:2]:
-            supp_ids = [uev.event_id] + [e.event_id for e in direct_errors[:2]]
+        upstream_by_service: dict[str, list[CorrelatedEvent]] = {}
+        for uev in upstream_events:
+            upstream_by_service.setdefault(uev.service, []).append(uev)
+
+        sorted_services = sorted(
+            upstream_by_service.keys(),
+            key=lambda s: (
+                0 if (any(e.incident_id == incident_id for e in upstream_by_service[s]) and any(s.lower() in e.description.lower() for e in direct_errors))
+                else 1 if any(s.lower() in e.description.lower() for e in direct_errors)
+                else 2 if any(e.incident_id == incident_id for e in upstream_by_service[s])
+                else 3 if any(e.relationship_verification_status == "verified" for e in upstream_by_service[s])
+                else 4,
+                0 if any(e.relationship_verification_status == "verified" for e in upstream_by_service[s]) else 1,
+            )
+        )
+
+        for svc in sorted_services[:3]:
+            svc_events = upstream_by_service[svc]
+            uev = svc_events[0]
+            supp_ids = [e.event_id for e in svc_events[:3]] + [e.event_id for e in direct_errors[:2]]
             valid_ids, hydrated_items, _ = validate_and_sanitize_evidence_ids(supp_ids, catalog)
 
-            is_verified = uev.relationship_verification_status == "verified"
+            is_verified = any(e.relationship_verification_status == "verified" for e in svc_events)
             confidence = ConfidenceLevel.PROBABLE.value if is_verified else ConfidenceLevel.POSSIBLE.value
             verification_note = (
                 "Verified dependency relationship."
@@ -465,7 +495,7 @@ def analyze_root_cause_deterministic(
             )
 
             explanation = (
-                f"Degradation or failure in upstream dependency '{uev.service}' propagated to {incident_service}, "
+                f"Degradation or failure in upstream dependency '{svc}' propagated to {incident_service}, "
                 f"impairing its ability to fulfill requests."
             )
 
@@ -474,42 +504,42 @@ def analyze_root_cause_deterministic(
                 RootCauseHypothesis(
                     rank=hyp_rank,
                     explanation=explanation,
-                    suspected_service=uev.service,
+                    suspected_service=svc,
                     suspected_component=f"Upstream dependency ({uev.relationship_type or 'service'})",
                     confidence=confidence,
                     confidence_explanation=(
-                        f"Assigned '{confidence}' because upstream service {uev.service} experienced failures. {verification_note}"
+                        f"Assigned '{confidence}' because upstream service {svc} experienced failures. {verification_note}"
                     ),
                     supporting_evidence_ids=valid_ids,
                     supporting_evidence=hydrated_items,
                     contradicting_evidence=[],
                     observed_facts=[
-                        f"Upstream service {uev.service} emitted {uev.event_type} at {uev.timestamp}."
+                        f"Upstream service {svc} emitted {uev.event_type} at {uev.timestamp}."
                     ],
                     inferred_relationships=[
-                        f"{incident_service} depends on {uev.service}; failure in {uev.service} cascades to {incident_service}."
+                        f"{incident_service} depends on {svc}; failure in {svc} cascades to {incident_service}."
                     ],
                     unverified_assumptions=[
-                        f"Assumes connection from {incident_service} to {uev.service} was actively attempted during the failure window."
+                        f"Assumes connection from {incident_service} to {svc} was actively attempted during the failure window."
                         if not is_verified
                         else "Assumes upstream failure directly correlates with downstream timeout thresholds."
                     ],
                     recommended_verification_steps=[
-                        f"Inspect health metrics and error logs for upstream dependency {uev.service}.",
-                        f"Verify network connectivity and latency between {incident_service} and {uev.service}.",
+                        f"Inspect health metrics and error logs for upstream dependency {svc}.",
+                        f"Verify network connectivity and latency between {incident_service} and {svc}.",
                     ],
                     alternative_explanations=[
-                        f"Transient network glitch or client-side retry storm towards {uev.service}."
+                        f"Transient network glitch or client-side retry storm towards {svc}."
                     ],
                     ranking_rationale=(
-                        f"Rank #{hyp_rank}: Upstream dependency {uev.service} failure. "
+                        f"Rank #{hyp_rank}: Upstream dependency {svc} failure. "
                         f"Ranked below direct matches because direct service errors have higher causal directness."
                     ),
                 )
             )
 
     # Re-rank hypotheses based on explainable criteria:
-    # 1. Category: Direct deployment+error (0) > Direct error only (1) > Upstream verified dependency (2) > Upstream configured dependency (3) > Other (4)
+    # 1. Category: Direct deployment+error (0) > Indicated upstream dependency (1) > Direct error only (2) > Upstream verified dependency (3) > Upstream configured dependency (4) > Other (5)
     # 2. Confidence: Confirmed (0) > Probable (1) > Possible (2)
     # 3. Contradicting evidence count: 0 contradictions ranks before > 0 contradictions
     def _rank_key(h: RootCauseHypothesis) -> tuple[int, int, int]:
@@ -518,16 +548,24 @@ def analyze_root_cause_deterministic(
         is_verified_dep = "verified dependency relationship" in h.confidence_explanation.lower()
         is_configured_dep = "configured dependency relationship" in h.confidence_explanation.lower()
 
+        is_upstream_indicated = is_verified_dep and (
+            any(h.suspected_service.lower() in e.description.lower() for e in direct_errors)
+            or any(h.suspected_service.lower() in incident_title.lower() for _ in [1])
+            or any(h.suspected_service.lower() in incident.get("description", "").lower() for _ in [1])
+        )
+
         if is_direct_causal:
             cat = 0
-        elif is_direct_error:
+        elif is_upstream_indicated:
             cat = 1
-        elif is_verified_dep:
+        elif is_direct_error:
             cat = 2
-        elif is_configured_dep:
+        elif is_verified_dep:
             cat = 3
-        else:
+        elif is_configured_dep:
             cat = 4
+        else:
+            cat = 5
 
         conf = 0 if h.confidence == "Confirmed" else 1 if h.confidence == "Probable" else 2
         contra = len(h.contradicting_evidence)

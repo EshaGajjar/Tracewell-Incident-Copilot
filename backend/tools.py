@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -27,12 +28,14 @@ def _stable_key(*parts: Any) -> str:
 
 def build_tools(incident_id: str) -> list[Callable]:
     def recorded(name: str, fn: Callable, args: dict[str, Any]) -> dict[str, Any]:
+        execution_id = f"exec_{uuid.uuid4().hex[:12]}"
         append_step(
             incident_id,
             step_type="tool_call",
             tool=name,
             input_data=args,
             output_data={"status": "started"},
+            execution_id=execution_id,
         )
         try:
             result = fn(**args)
@@ -42,6 +45,7 @@ def build_tools(incident_id: str) -> list[Callable]:
                 tool=name,
                 input_data=args,
                 output_data=result,
+                execution_id=execution_id,
             )
             return result
         except Exception as exc:
@@ -52,6 +56,7 @@ def build_tools(incident_id: str) -> list[Callable]:
                 tool=name,
                 input_data=args,
                 output_data=result,
+                execution_id=execution_id,
             )
             return result
 
@@ -248,18 +253,31 @@ def build_tools(incident_id: str) -> list[Callable]:
         """Record a proposed remediation for human review; never execute it."""
         from .store import update_incident
 
+        now = datetime.now(timezone.utc).isoformat()
         pending = {
             "action": action,
             "reason": reason,
             "target_revision": target_revision or None,
             "status": "pending",
-            "proposed_at": datetime.now(timezone.utc).isoformat(),
+            "lifecycle_state": "pending_approval",
+            "proposed_at": now,
         }
+
+        history = [
+            {
+                "event": "proposed",
+                "timestamp": now,
+                "action": action,
+                "reason": reason,
+                "target_revision": target_revision or None,
+            }
+        ]
 
         update_incident(
             incident_id,
             {
                 "pending_action": pending,
+                "action_history": history,
                 "status": "awaiting_approval",
             },
         )

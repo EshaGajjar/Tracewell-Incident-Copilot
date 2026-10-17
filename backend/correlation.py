@@ -413,7 +413,10 @@ def correlate_events_for_incident(
 
     window_start = created_dt - timedelta(minutes=lookback_minutes)
     resolved_dt = _parse_iso_timestamp(incident.get("resolved_at"))
-    window_end = (resolved_dt or datetime.now(timezone.utc)) + timedelta(minutes=15)
+    if resolved_dt:
+        window_end = resolved_dt + timedelta(minutes=15)
+    else:
+        window_end = created_dt + timedelta(minutes=45)
 
     # Retrieve dependency topology for the incident service
     deps_info = get_service_dependencies(incident_service, direction="both")
@@ -434,24 +437,30 @@ def correlate_events_for_incident(
     except Exception as exc:
         logger.warning("Could not load incident events: %s", exc)
 
-    # 3. Events from related services across the store
+    # 3. Events from related dependency services across the store within the temporal window
     try:
         all_store_events = list_all_operational_events(limit=300)
-        # Filter to include events matching incident service or its direct dependencies
-        relevant_services = {incident_service.lower()}
+        # Filter to include events matching direct dependencies (upstream or downstream)
+        # Primary service events belong to their specific incidents and must not be cross-pollinated
+        dependency_services = set()
         for d in upstream_deps:
             target_svc = d.get("target") or d.get("target_service")
-            if target_svc:
-                relevant_services.add(target_svc.lower())
+            if target_svc and target_svc.lower() != incident_service.lower():
+                dependency_services.add(target_svc.lower())
         for d in downstream_deps:
             source_svc = d.get("source") or d.get("source_service")
-            if source_svc:
-                relevant_services.add(source_svc.lower())
+            if source_svc and source_svc.lower() != incident_service.lower():
+                dependency_services.add(source_svc.lower())
 
         for ev in all_store_events:
+            ev_inc = ev.get("incident_id")
+            if ev_inc and ev_inc == incident_id:
+                continue
             ev_svc = (ev.get("service") or "").lower()
-            if ev_svc in relevant_services:
-                raw_candidates.append(ev)
+            if ev_svc in dependency_services:
+                ev_dt = _parse_iso_timestamp(ev.get("timestamp") or ev.get("event_timestamp"))
+                if ev_dt and window_start and window_end and (window_start <= ev_dt <= window_end):
+                    raw_candidates.append(ev)
     except Exception as exc:
         logger.warning("Could not query store events for related services: %s", exc)
 
