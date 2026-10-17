@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo, useRef } from "react";
 import { api, request, API_URL } from "../firebase.js";
 import CausalGraphView from "./CausalGraphView.jsx";
 import { InvestigationProgress } from "./InvestigationProgress.jsx";
+import JsonCodeBlock from "./JsonCodeBlock.jsx";
 import {
   SearchIcon,
   RocketIcon,
@@ -1215,6 +1216,42 @@ export default function IncidentDetail({
                     </div>
                   </div>
 
+                  {run.steps.length > 1 && (
+                    <div className="run-sequence-bar" aria-label="Investigation sequence flow">
+                      <span className="sequence-label">Step Flow:</span>
+                      <div className="sequence-track">
+                        {run.steps.map((st, i) => {
+                          const isStFinal =
+                            (i === run.steps.length - 1 &&
+                              run.steps.length > 1 &&
+                              run.status !== "in_progress") ||
+                            st.tool === "investigation_completed" ||
+                            st.tool === "investigation_failed";
+                          const stLabel = isStFinal ? "Final Step" : `Step ${i + 1}`;
+                          const stKey = getStepKey(st, i);
+                          const isSelected = selectedEvent === stKey;
+                          const stEvent = getEventDetails(st);
+                          return (
+                            <div key={stKey} className="sequence-node-wrap">
+                              <button
+                                type="button"
+                                className={`sequence-node-btn ${isSelected ? "selected" : ""}`}
+                                onClick={() => setSelectedEvent(isSelected ? null : stKey)}
+                                title={`Inspect ${stLabel}: ${stEvent.title}`}
+                              >
+                                <span className="sequence-node-step">{stLabel}</span>
+                                <span className="sequence-node-name">{stEvent.title}</span>
+                              </button>
+                              {i < run.steps.length - 1 && (
+                                <span className="sequence-arrow" aria-hidden="true">→</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="timeline-grid">
                     {run.steps.map((step, index) => {
                       const event = getEventDetails(step);
@@ -1222,100 +1259,179 @@ export default function IncidentDetail({
                       const stepKey = getStepKey(step, index);
                       const selected = selectedEvent === stepKey;
                       const summary = getStepSummary(step);
+                      const isFinal =
+                        (index === run.steps.length - 1 &&
+                          run.steps.length > 1 &&
+                          run.status !== "in_progress") ||
+                        step.tool === "investigation_completed" ||
+                        step.tool === "investigation_failed";
+                      const stepLabel = isFinal ? "Final Step" : `Step ${index + 1}`;
 
                       return (
-                        <button
-                          type="button"
+                        <div
                           key={stepKey}
-                          className={`timeline-event-card ${selected ? "selected" : ""}`}
-                          onClick={() => setSelectedEvent(selected ? null : stepKey)}
+                          className={`timeline-step-row ${selected ? "is-selected" : ""}`}
                         >
-                          <span className="timeline-event-icon">
-                            <IconComponent size={14} />
-                          </span>
+                          <button
+                            type="button"
+                            className={`timeline-event-card ${selected ? "selected" : ""}`}
+                            onClick={() => setSelectedEvent(selected ? null : stepKey)}
+                            aria-expanded={selected}
+                            aria-controls={`evidence-${stepKey}`}
+                          >
+                            <span className={`timeline-event-icon ${selected ? "selected" : ""}`}>
+                              <IconComponent size={14} />
+                            </span>
 
-                          <div className="timeline-event-body">
-                            <strong>{event.title}</strong>
-                            {summary && (
-                              <span className="timeline-event-summary">{summary}</span>
-                            )}
-                            <div className="timeline-event-meta">
-                              <span className="timeline-event-time">
-                                {formatTimestamp(step.ts)}
-                              </span>
-                              {step.execution_id && (
-                                <code className="kbd-shortcut">
-                                  id: {String(step.execution_id).slice(-8)}
-                                </code>
+                            <div className="timeline-event-body">
+                              <strong className="timeline-event-title">
+                                <span className={`timeline-step-prefix ${isFinal ? "final" : ""}`}>
+                                  {stepLabel}:
+                                </span>{" "}
+                                {event.title}
+                              </strong>
+                              {summary && (
+                                <span className="timeline-event-summary">{summary}</span>
                               )}
-                              <span className="timeline-event-action">
-                                {selected ? "Close inspection" : "Inspect evidence →"}
-                              </span>
+                              <div className="timeline-event-meta">
+                                <span className="timeline-event-time">
+                                  {formatTimestamp(step.ts)}
+                                </span>
+                                {step.execution_id && (
+                                  <code className="kbd-shortcut">
+                                    id: {String(step.execution_id).slice(-8)}
+                                  </code>
+                                )}
+                                <span className="timeline-event-action">
+                                  {selected ? "Close inspection" : "Inspect evidence →"}
+                                </span>
+                              </div>
                             </div>
-                          </div>
-                        </button>
+                          </button>
+
+                          {/* Expanded evidence details immediately BELOW this step */}
+                          {selected && (
+                            <div
+                              id={`evidence-${stepKey}`}
+                              className="timeline-inline-evidence-container"
+                              role="region"
+                              aria-label={`${stepLabel} evidence details`}
+                            >
+                              <div className="timeline-evidence-branch">
+                                <span className="branch-line" aria-hidden="true">└──</span>
+                                <span className="branch-label">Expanded Evidence Details</span>
+                              </div>
+
+                              <div className="timeline-evidence-card">
+                                <div className="timeline-evidence-card-header">
+                                  <div className="evidence-header-main">
+                                    <div className="evidence-header-title-row">
+                                      <span className="evidence-step-icon">
+                                        <IconComponent size={14} />
+                                      </span>
+                                      <h4 className="evidence-step-name">
+                                        <span className={`evidence-step-badge ${isFinal ? "final" : ""}`}>
+                                          {stepLabel}
+                                        </span>
+                                        <span>{event.title}</span>
+                                      </h4>
+                                    </div>
+
+                                    <div className="evidence-header-badges">
+                                      <span className="evidence-timestamp" title="Timestamp">
+                                        <ClockIcon size={12} />
+                                        <span>{formatTimestamp(step.ts)}</span>
+                                      </span>
+
+                                      {(step.run_id || run.runId) && (
+                                        <span className="evidence-run-id" title="Investigation Run ID">
+                                          <code className="run-id-pill">run: {step.run_id || run.runId}</code>
+                                        </span>
+                                      )}
+
+                                      {step.execution_id && (
+                                        <span className="evidence-exec-id" title="Execution ID">
+                                          <code className="kbd-shortcut">
+                                            exec: {String(step.execution_id).slice(-8)}
+                                          </code>
+                                        </span>
+                                      )}
+
+                                      {step.tool && (
+                                        <span className="evidence-tool-badge" title="Invoked Tool">
+                                          tool: {step.tool}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    className="evidence-close-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSelectedEvent(null);
+                                    }}
+                                    title="Collapse evidence panel"
+                                    aria-label="Collapse evidence panel"
+                                  >
+                                    ✕ Close
+                                  </button>
+                                </div>
+
+                                {(step.error || step.output?.error) && (
+                                  <div className="timeline-evidence-error-banner" role="alert">
+                                    <AlertTriangleIcon size={16} />
+                                    <div className="error-banner-content">
+                                      <strong>Investigation Step Warning / Error</strong>
+                                      <p>{String(step.error || step.output?.error)}</p>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {summary && (
+                                  <div className="timeline-evidence-block">
+                                    <div className="evidence-block-header">
+                                      <h4>Result Summary</h4>
+                                    </div>
+                                    <p className="timeline-evidence-summary-text">{summary}</p>
+                                  </div>
+                                )}
+
+                                {step.input != null && (
+                                  <div className="timeline-evidence-block">
+                                    <div className="evidence-block-header">
+                                      <h4>Tool Arguments</h4>
+                                    </div>
+                                    <JsonCodeBlock data={step.input} label="tool arguments" />
+                                  </div>
+                                )}
+
+                                {step.output != null && (
+                                  <div className="timeline-evidence-block">
+                                    <div className="evidence-block-header">
+                                      <h4>Result Evidence Payload</h4>
+                                    </div>
+                                    <JsonCodeBlock data={step.output} label="result evidence payload" />
+                                  </div>
+                                )}
+
+                                {step.input == null && step.output == null && !summary && (
+                                  <div className="timeline-evidence-block">
+                                    <p className="muted" style={{ fontSize: "12px", margin: 0 }}>
+                                      No payload recorded for this investigation step.
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
                 </div>
               ))}
-
-              {/* Slide-over Evidence Inspector */}
-              {selectedEvent !== null &&
-                (() => {
-                  const selectedIndex = visibleSteps.findIndex(
-                    (step, index) => getStepKey(step, index) === selectedEvent
-                  );
-                  const step = visibleSteps[selectedIndex];
-                  if (!step) return null;
-
-                  const event = getEventDetails(step);
-                  const IconComponent = event.icon;
-                  const summary = getStepSummary(step);
-
-                  return (
-                    <div className="timeline-evidence-drawer">
-                      <div className="timeline-evidence-label">
-                        Selected Investigation Step Evidence
-                      </div>
-
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
-                        <IconComponent size={16} />
-                        <h4>{event.title}</h4>
-                      </div>
-
-                      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "8px" }}>
-                        <span className="muted">{formatTimestamp(step.ts)}</span>
-                        {step.run_id && (
-                          <span className="run-id-pill" style={{ fontSize: "11px" }}>
-                            {step.run_id}
-                          </span>
-                        )}
-                      </div>
-
-                      {summary && (
-                        <div className="timeline-evidence-block">
-                          <h4>Result Summary</h4>
-                          <p style={{ fontSize: "13px", color: "var(--text-primary)" }}>{summary}</p>
-                        </div>
-                      )}
-
-                      {step.input != null && (
-                        <div className="timeline-evidence-block">
-                          <h4>Tool Arguments</h4>
-                          <pre>{formatValue(step.input)}</pre>
-                        </div>
-                      )}
-
-                      {step.output != null && (
-                        <div className="timeline-evidence-block">
-                          <h4>Result Evidence Payload</h4>
-                          <pre>{formatValue(step.output)}</pre>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
             </>
           )}
         </section>
