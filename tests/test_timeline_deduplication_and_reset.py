@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app
-from backend.timeline import filter_timeline_steps, generate_step_summary
+from backend.main import app, _active_investigations, _active_investigations_lock
+from backend.timeline import filter_timeline_steps, generate_step_summary, group_steps_by_run
 from backend.store import (
     _local_db_path,
     append_operational_event,
@@ -413,3 +414,213 @@ def test_scenario_10_insufficient_evidence_explicit_result(client):
     assert rca["status"] == "insufficient_evidence"
     assert "Insufficient evidence to determine root cause" in rca["summary"]
     assert len(rca["hypotheses"]) == 0
+
+
+# ===================================================================
+# Task: Re-Run Investigation, History Preservation & Concurrency Tests
+# ===================================================================
+
+def test_rerun_investigation_assigns_unique_run_ids_and_preserves_history(client):
+    """Verify that re-running an investigation assigns unique run_ids, preserves history,
+    and returns grouped runs with the latest run first.
+    """
+    sid = f"inc-test-rerun-{uuid.uuid4().hex[:8]}"
+    create_local_incident(
+        incident_id=sid,
+        fields={
+            "title": "Test Incident for Re-run Investigation",
+            "description": "Testing run_id association and history preservation",
+            "service": "payment-api",
+            "severity": "SEV2",
+        },
+    )
+
+    # 1. First investigation run
+    r1 = client.post("/investigate", json={"incident_id": sid, "run_id": "run_test_001"})
+    assert r1.status_code == 200, f"Run 1 failed: {r1.text}"
+    assert r1.json().get("run_id") == "run_test_001"
+
+    # Steps after run 1
+    steps_r1 = client.get(f"/incidents/{sid}/steps?raw=false").json()
+    assert len(steps_r1) > 0
+    for s in steps_r1:
+        assert s.get("run_id") == "run_test_001"
+
+    # Verify single run group
+    runs_after_1 = client.get(f"/incidents/{sid}/steps?group_by_run=true").json()
+    assert len(runs_after_1) == 1
+    assert runs_after_1[0]["run_id"] == "run_test_001"
+    assert runs_after_1[0]["is_latest"] is True
+    assert runs_after_1[0]["label"] == "Run #1 (Latest)"
+
+    # 2. Re-run investigation with second run_id
+    r2 = client.post("/investigate", json={"incident_id": sid, "run_id": "run_test_002"})
+    assert r2.status_code == 200, f"Run 2 failed: {r2.text}"
+    assert r2.json().get("run_id") == "run_test_002"
+
+    # Verify all historical steps are preserved (step count increased)
+    all_steps = client.get(f"/incidents/{sid}/steps?raw=false").json()
+    assert len(all_steps) > len(steps_r1), "Re-run must preserve previous run steps, not overwrite them"
+
+    # Verify steps can be queried per specific run_id
+    only_run1 = client.get(f"/incidents/{sid}/steps?run_id=run_test_001").json()
+    assert len(only_run1) == len(steps_r1)
+    for s in only_run1:
+        assert s.get("run_id") == "run_test_001"
+
+    only_run2 = client.get(f"/incidents/{sid}/steps?run_id=run_test_002").json()
+    assert len(only_run2) > 0
+    for s in only_run2:
+        assert s.get("run_id") == "run_test_002"
+
+    # 3. Verify grouped runs: latest run (run_test_002) is first and clearly labeled
+    grouped_runs = client.get(f"/incidents/{sid}/steps?group_by_run=true").json()
+    assert len(grouped_runs) == 2
+
+    # Latest run is FIRST
+    latest_run = grouped_runs[0]
+    assert latest_run["run_id"] == "run_test_002"
+    assert latest_run["is_latest"] is True
+    assert latest_run["run_number"] == 2
+    assert "Latest" in latest_run["label"]
+    assert latest_run["status"] in {"completed", "in_progress"}
+    assert len(latest_run["steps"]) == len(only_run2)
+
+    # Previous run is preserved as second
+    historical_run = grouped_runs[1]
+    assert historical_run["run_id"] == "run_test_001"
+    assert historical_run["is_latest"] is False
+    assert historical_run["run_number"] == 1
+    assert "Run #1" in historical_run["label"]
+    assert len(historical_run["steps"]) == len(only_run1)
+
+
+def test_group_steps_by_run_displays_latest_first():
+    """Verify group_steps_by_run groups steps, infers legacy boundaries, and displays latest first."""
+    sample_steps = [
+        # Run 1 steps
+        {"run_id": "run_alpha", "tool": "investigation", "type": "message", "output": "Investigation started.", "ts": "2026-10-17T10:00:00Z"},
+        {"run_id": "run_alpha", "tool": "get_logs", "type": "tool_result", "output": {"logs": []}, "ts": "2026-10-17T10:00:01Z"},
+        {"run_id": "run_alpha", "tool": "investigation_completed", "type": "message", "output": "Done", "ts": "2026-10-17T10:00:05Z"},
+        # Run 2 steps
+        {"run_id": "run_beta", "tool": "investigation", "type": "message", "output": "Investigation started.", "ts": "2026-10-17T11:00:00Z"},
+        {"run_id": "run_beta", "tool": "check_service_health", "type": "tool_result", "output": {"status": "ok"}, "ts": "2026-10-17T11:00:02Z"},
+        {"run_id": "run_beta", "tool": "submit_diagnosis", "type": "diagnosis", "output": {"diagnosis": {"root_cause": "Bug"}}, "ts": "2026-10-17T11:00:03Z"},
+    ]
+
+    grouped = group_steps_by_run(sample_steps)
+    assert len(grouped) == 2
+
+    # Latest run is first (Run #2 / run_beta)
+    assert grouped[0]["run_id"] == "run_beta"
+    assert grouped[0]["is_latest"] is True
+    assert grouped[0]["run_number"] == 2
+    assert "Latest" in grouped[0]["label"]
+    assert grouped[0]["diagnosis"] == {"root_cause": "Bug"}
+    assert len(grouped[0]["steps"]) == 3
+
+    # Historical run is second (Run #1 / run_alpha)
+    assert grouped[1]["run_id"] == "run_alpha"
+    assert grouped[1]["is_latest"] is False
+    assert grouped[1]["run_number"] == 1
+    assert "Run #1" in grouped[1]["label"]
+    assert len(grouped[1]["steps"]) == 3
+
+
+def test_investigation_concurrency_lock_prevents_duplicate_runs(client):
+    """Verify that attempting to trigger a concurrent investigation on the same incident
+    returns HTTP 409 Conflict to prevent duplicate submissions.
+    """
+    sid = f"inc-test-concurrency-{uuid.uuid4().hex[:8]}"
+    create_local_incident(
+        incident_id=sid,
+        fields={
+            "title": "Concurrency Test Incident",
+            "description": "Testing duplicate submission prevention",
+            "service": "payment-api",
+        },
+    )
+
+    # Simulate an active investigation in progress
+    with _active_investigations_lock:
+        _active_investigations.add(sid)
+
+    try:
+        # POST /investigate should fail with 409
+        r = client.post("/investigate", json={"incident_id": sid})
+        assert r.status_code == 409
+        assert "already in progress" in r.json()["detail"]
+
+        # Path-based POST /incidents/{sid}/investigate should also fail with 409
+        r_path = client.post(f"/incidents/{sid}/investigate")
+        assert r_path.status_code == 409
+
+        # Stream endpoint should also fail with 409
+        r_stream = client.get(f"/incidents/{sid}/investigate/stream")
+        assert r_stream.status_code == 409
+    finally:
+        with _active_investigations_lock:
+            _active_investigations.discard(sid)
+
+    # After lock release, normal investigation succeeds
+    r_ok = client.post("/investigate", json={"incident_id": sid})
+    assert r_ok.status_code == 200
+
+
+def test_tool_execution_retry_deduplication():
+    """Verify that retrying a tool execution with the same execution_id does not create duplicate entries."""
+    sid = f"inc-test-retry-{uuid.uuid4().hex[:8]}"
+    exec_id = f"exec_retry_{uuid.uuid4().hex[:8]}"
+
+    # Step call
+    s1 = append_step(
+        sid,
+        step_type="tool_call",
+        tool="get_deployment_info",
+        input_data={"service": "payment-api"},
+        output_data={"status": "started"},
+        execution_id=exec_id,
+        run_id="run_retry_test",
+    )
+    # Duplicate call attempt with identical execution_id and tool
+    s1_dup = append_step(
+        sid,
+        step_type="tool_call",
+        tool="get_deployment_info",
+        input_data={"service": "payment-api"},
+        output_data={"status": "started"},
+        execution_id=exec_id,
+        run_id="run_retry_test",
+    )
+    assert s1["execution_id"] == s1_dup["execution_id"]
+
+    # Result
+    s2 = append_step(
+        sid,
+        step_type="tool_result",
+        tool="get_deployment_info",
+        input_data={"service": "payment-api"},
+        output_data={"revisions": ["rev-1"]},
+        execution_id=exec_id,
+        run_id="run_retry_test",
+    )
+    # Duplicate result attempt
+    s2_dup = append_step(
+        sid,
+        step_type="tool_result",
+        tool="get_deployment_info",
+        input_data={"service": "payment-api"},
+        output_data={"revisions": ["rev-1"]},
+        execution_id=exec_id,
+        run_id="run_retry_test",
+    )
+    assert s2["execution_id"] == s2_dup["execution_id"]
+
+    # Verify timeline filter deduplicates exact fingerprints and pairs start/result
+    raw_steps = list_steps(sid)
+    filtered = filter_timeline_steps(raw_steps)
+    # Only 1 tool_result step should be visible for this execution_id (start hidden, duplicates stripped)
+    exec_steps = [s for s in filtered if s.get("execution_id") == exec_id]
+    assert len(exec_steps) == 1
+    assert exec_steps[0]["type"] == "tool_result"
+

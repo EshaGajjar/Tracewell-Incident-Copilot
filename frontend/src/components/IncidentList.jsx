@@ -300,21 +300,39 @@ export default function IncidentList({
         </div>
       </div>
 
-      {/* Error Notice */}
+      {/* Error Notice with Retry Action */}
       {error && (
-        <div className="notice error-notice">
-          <AlertCircleIcon size={15} />
-          <span>{error}</span>
+        <div
+          className="notice error-notice"
+          role="alert"
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <AlertCircleIcon size={15} />
+            <span>{error}</span>
+          </div>
+          {onRefresh && (
+            <button
+              type="button"
+              className="secondary-button compact"
+              onClick={onRefresh}
+              style={{ flexShrink: 0 }}
+            >
+              <RefreshCwIcon size={12} />
+              <span>Retry</span>
+            </button>
+          )}
         </div>
       )}
 
       {/* Table Content */}
       {loading && !items.length ? (
-        <div className="empty-state">
-          <RefreshCwIcon size={24} className="spin" />
-          <strong>Loading Incidents</strong>
-          <span>Connecting to incident store and retrieving telemetry...</span>
-        </div>
+        <IncidentTableSkeleton />
       ) : visible.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon">
@@ -461,3 +479,84 @@ export default function IncidentList({
     </div>
   );
 }
+
+function IncidentTableSkeleton() {
+  return (
+    <div className="incident-table-wrap">
+      <table className="incident-table" aria-label="Loading incidents table skeleton">
+        <thead>
+          <tr>
+            <th>INCIDENT</th>
+            <th>SERVICE</th>
+            <th>SEVERITY</th>
+            <th>STATUS</th>
+            <th>INVESTIGATION</th>
+            <th>REPORTED</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {[1, 2, 3, 4, 5].map((idx) => (
+            <tr key={idx} className="skeleton-table-row">
+              <td>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span
+                      className="skeleton-line"
+                      style={{ width: "68px", height: "16px", borderRadius: "4px" }}
+                    />
+                    <span
+                      className="skeleton-line"
+                      style={{ width: "160px", height: "16px", borderRadius: "4px" }}
+                    />
+                  </div>
+                  <span
+                    className="skeleton-line"
+                    style={{ width: "220px", height: "12px", borderRadius: "3px" }}
+                  />
+                </div>
+              </td>
+              <td>
+                <span
+                  className="skeleton-line"
+                  style={{ width: "88px", height: "20px", borderRadius: "4px" }}
+                />
+              </td>
+              <td>
+                <span
+                  className="skeleton-line"
+                  style={{ width: "54px", height: "20px", borderRadius: "999px" }}
+                />
+              </td>
+              <td>
+                <span
+                  className="skeleton-line"
+                  style={{ width: "74px", height: "20px", borderRadius: "999px" }}
+                />
+              </td>
+              <td>
+                <span
+                  className="skeleton-line"
+                  style={{ width: "112px", height: "20px", borderRadius: "4px" }}
+                />
+              </td>
+              <td>
+                <span
+                  className="skeleton-line"
+                  style={{ width: "72px", height: "14px", borderRadius: "4px" }}
+                />
+              </td>
+              <td>
+                <span
+                  className="skeleton-line"
+                  style={{ width: "14px", height: "14px", borderRadius: "4px" }}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+

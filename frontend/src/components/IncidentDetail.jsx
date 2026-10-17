@@ -1,6 +1,7 @@
-import { useEffect, useState, useMemo } from "react";
-import { api, request } from "../firebase.js";
+import { useEffect, useState, useMemo, useRef } from "react";
+import { api, request, API_URL } from "../firebase.js";
 import CausalGraphView from "./CausalGraphView.jsx";
+import { InvestigationProgress } from "./InvestigationProgress.jsx";
 import {
   SearchIcon,
   RocketIcon,
@@ -128,10 +129,11 @@ function getStepSummary(step) {
 function filterVisibleSteps(stepList) {
   if (!Array.isArray(stepList) || stepList.length === 0) return [];
 
+  // Scoped completed execution IDs per run to prevent cross-run suppression
   const completedExecIds = new Set();
   for (const s of stepList) {
     if (s.type === "tool_result" && s.execution_id) {
-      completedExecIds.add(String(s.execution_id));
+      completedExecIds.add(`${s.run_id || ""}:${s.execution_id}`);
     }
   }
 
@@ -139,9 +141,19 @@ function filterVisibleSteps(stepList) {
     (s) => s.type === "tool_result" && !s.execution_id
   );
   const usedLegacyIndices = new Set();
+  const seenStepFingerprints = new Set();
 
   const visible = [];
   for (const s of stepList) {
+    // Retry deduplication: exact same run, execution_id, step_type, and tool
+    if (s.execution_id && s.type) {
+      const fp = `${s.run_id || ""}:${s.execution_id}:${s.type}:${s.tool || ""}`;
+      if (seenStepFingerprints.has(fp)) {
+        continue;
+      }
+      seenStepFingerprints.add(fp);
+    }
+
     if (isLifecycleStep(s)) {
       visible.push(s);
       continue;
@@ -152,14 +164,14 @@ function filterVisibleSteps(stepList) {
       (s.output?.status === "started" || (!s.output && !s.error));
 
     if (isStarted) {
-      if (s.execution_id && completedExecIds.has(String(s.execution_id))) {
+      if (s.execution_id && completedExecIds.has(`${s.run_id || ""}:${s.execution_id}`)) {
         continue;
       }
       if (!s.execution_id) {
         let paired = false;
         for (let i = 0; i < legacyResults.length; i++) {
           if (usedLegacyIndices.has(i)) continue;
-          if (legacyResults[i].tool === s.tool) {
+          if (legacyResults[i].tool === s.tool && (legacyResults[i].run_id || "") === (s.run_id || "")) {
             usedLegacyIndices.add(i);
             paired = true;
             break;
@@ -173,6 +185,75 @@ function filterVisibleSteps(stepList) {
   }
 
   return visible;
+}
+
+function groupStepsByRun(stepList) {
+  if (!Array.isArray(stepList) || stepList.length === 0) return [];
+
+  const runsMap = new Map();
+  let currentInferredRun = "run_1";
+  let legacyCounter = 0;
+
+  for (const step of stepList) {
+    let runId = step.run_id;
+    if (!runId) {
+      const tool = (step.tool || "").toLowerCase();
+      const output = typeof step.output === "string" ? step.output.toLowerCase() : "";
+      if (tool === "investigation" || output.includes("investigation started")) {
+        legacyCounter++;
+        currentInferredRun = `run_legacy_${legacyCounter}`;
+      }
+      runId = currentInferredRun;
+    }
+    if (!runsMap.has(runId)) {
+      runsMap.set(runId, []);
+    }
+    runsMap.get(runId).push({ ...step, run_id: runId });
+  }
+
+  const runKeys = Array.from(runsMap.keys());
+  const totalRuns = runKeys.length;
+  const runs = [];
+
+  for (let i = runKeys.length - 1; i >= 0; i--) {
+    const runId = runKeys[i];
+    const runSteps = runsMap.get(runId);
+    const runNumber = i + 1;
+    const isLatest = i === totalRuns - 1;
+    const firstStep = runSteps[0] || {};
+    const lastStep = runSteps[runSteps.length - 1] || {};
+
+    let status = "in_progress";
+    let diagnosis = null;
+    for (const s of runSteps) {
+      if (s.tool === "submit_diagnosis" && typeof s.output === "object" && s.output?.diagnosis) {
+        diagnosis = s.output.diagnosis;
+      }
+      if (s.tool === "investigation_completed") {
+        status = "completed";
+      } else if (s.tool === "investigation_failed" || s.tool === "agent_error") {
+        status = "failed";
+      }
+    }
+    if (status === "in_progress" && (diagnosis || !isLatest)) {
+      status = "completed";
+    }
+
+    runs.push({
+      runId,
+      runNumber,
+      label: `Run #${runNumber}${isLatest ? " (Latest)" : ""}`,
+      isLatest,
+      status,
+      startedAt: firstStep.ts,
+      completedAt: status === "completed" || status === "failed" ? lastStep.ts : null,
+      stepCount: runSteps.length,
+      diagnosis,
+      steps: runSteps,
+    });
+  }
+
+  return runs;
 }
 
 function getEventDetails(step) {
@@ -203,14 +284,16 @@ function formatValue(value) {
 }
 
 function getStepKey(step, index) {
-  if (step.execution_id) return `exec-${step.execution_id}`;
-  if (step.id != null) return `id-${step.id}`;
-  if (step.index != null) return `idx-${step.index}`;
-  return `step-${index}`;
+  const runPrefix = step.run_id ? `${step.run_id}-` : "";
+  if (step.execution_id) return `${runPrefix}exec-${step.execution_id}`;
+  if (step.id != null) return `${runPrefix}id-${step.id}`;
+  if (step.index != null) return `${runPrefix}idx-${step.index}`;
+  return `${runPrefix}step-${index}`;
 }
 
 export default function IncidentDetail({
   id,
+  autoInvestigate = false,
   onNavigateToDependencies,
   onIncidentUpdated,
   onBack,
@@ -225,9 +308,18 @@ export default function IncidentDetail({
 
   const [activeTab, setActiveTab] = useState("root_cause"); // root_cause | timeline | causal_graph | topology | remediation
   const [selectedEvent, setSelectedEvent] = useState(null);
+  const [selectedRunId, setSelectedRunId] = useState(null);
   const [correlationFilter, setCorrelationFilter] = useState("all");
 
   const [investigating, setInvestigating] = useState(false);
+  const [investigationStages, setInvestigationStages] = useState({});
+  const [currentStageKey, setCurrentStageKey] = useState("retrieving_details");
+  const [investigationStartTime, setInvestigationStartTime] = useState(null);
+  const [investigationError, setInvestigationError] = useState("");
+  const [isStreaming, setIsStreaming] = useState(true);
+  const abortControllerRef = useRef(null);
+  const hasAutoTriggeredRef = useRef(false);
+
   const [analyzingRootCause, setAnalyzingRootCause] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [rcaError, setRcaError] = useState("");
@@ -341,6 +433,24 @@ export default function IncidentDetail({
     return filterVisibleSteps(sortedSteps);
   }, [sortedSteps]);
 
+  const groupedRuns = useMemo(() => {
+    return groupStepsByRun(visibleSteps);
+  }, [visibleSteps]);
+
+  const activeRun = useMemo(() => {
+    if (!groupedRuns.length) return null;
+    if (!selectedRunId || selectedRunId === "latest") {
+      return groupedRuns[0];
+    }
+    return groupedRuns.find((r) => r.runId === selectedRunId) || groupedRuns[0];
+  }, [groupedRuns, selectedRunId]);
+
+  const displayedRuns = useMemo(() => {
+    if (!groupedRuns.length) return [];
+    if (selectedRunId === "all") return groupedRuns;
+    return activeRun ? [activeRun] : [];
+  }, [groupedRuns, activeRun, selectedRunId]);
+
   const leadingHypothesis = rootCauseAnalysis?.hypotheses?.[0];
 
   async function triggerRootCauseAnalysis() {
@@ -359,15 +469,116 @@ export default function IncidentDetail({
   }
 
   async function startInvestigation() {
-    if (investigating) return;
+    if (investigating) return; // Prevent duplicate investigation submissions
+    const clientRunId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setInvestigating(true);
+    setInvestigationError("");
     setLoadError("");
+    setSelectedRunId(clientRunId);
+    setInvestigationStartTime(Date.now());
+    setCurrentStageKey("retrieving_details");
+    setInvestigationStages({
+      retrieving_details: {
+        status: "in_progress",
+        message: `Verifying incident scope and affected service for '${id}'...`,
+      },
+    });
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const timeoutId = setTimeout(() => {
+      controller.abort("timeout");
+    }, 60000); // 60s timeout protection
+
+    let streamCompleted = false;
+
     try {
-      await api("/investigate", { incident_id: id });
+      // 1. Try streaming updates via SSE endpoint with run_id
+      let streamAttempted = false;
+      try {
+        const streamUrl = `${API_URL}/incidents/${encodeURIComponent(id)}/investigate/stream?run_id=${encodeURIComponent(clientRunId)}`;
+        const resp = await fetch(streamUrl, {
+          signal: controller.signal,
+          headers: { Accept: "text/event-stream" },
+        });
+
+        if (resp.ok && resp.body) {
+          streamAttempted = true;
+          setIsStreaming(true);
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const chunks = buffer.split("\n\n");
+            buffer = chunks.pop() || "";
+
+            for (const chunk of chunks) {
+              const dataLine = chunk.trim().replace(/^data:\s*/, "");
+              if (!dataLine) continue;
+              try {
+                const event = JSON.parse(dataLine);
+                if (event.stage === "error" || event.status === "failed") {
+                  throw new Error(event.message || "Investigation failed.");
+                }
+
+                if (event.stage === "complete") {
+                  streamCompleted = true;
+                } else if (event.stage) {
+                  setCurrentStageKey(event.stage);
+                  setInvestigationStages((prev) => ({
+                    ...prev,
+                    [event.stage]: {
+                      status: event.status,
+                      message: event.message,
+                      label: event.label,
+                      data: event.data,
+                    },
+                  }));
+                }
+              } catch (parseErr) {
+                if (parseErr.message && !parseErr.message.includes("JSON")) {
+                  throw parseErr;
+                }
+              }
+            }
+          }
+        }
+      } catch (streamErr) {
+        if (controller.signal.aborted) {
+          throw streamErr;
+        }
+        console.warn("SSE stream failed or unavailable, falling back to POST /investigate", streamErr);
+      }
+
+      // 2. If SSE stream didn't finish or wasn't available, fall back to POST /investigate with truthful indeterminate progress
+      if (!streamCompleted) {
+        setIsStreaming(false);
+        setCurrentStageKey("collecting_events");
+        setInvestigationStages((prev) => ({
+          ...prev,
+          retrieving_details: { status: "completed", message: "Incident record verified." },
+          collecting_events: { status: "in_progress", message: "Gathering operational evidence and evaluating causal hypotheses..." },
+        }));
+
+        await api(
+          "/investigate",
+          { incident_id: id, run_id: clientRunId },
+          { signal: controller.signal, timeoutMs: 58000 }
+        );
+        streamCompleted = true;
+      }
+
+      clearTimeout(timeoutId);
+
+      // Refresh incident and all associated findings
       const [incident, timeline, events, corrRes, rcaRes] = await Promise.all([
         request(`/incidents/${encodeURIComponent(id)}`),
-        request(`/incidents/${encodeURIComponent(id)}/steps?raw=false`),
-        request(`/incidents/${encodeURIComponent(id)}/events`),
+        request(`/incidents/${encodeURIComponent(id)}/steps?raw=false`).catch(() => []),
+        request(`/incidents/${encodeURIComponent(id)}/events`).catch(() => []),
         request(`/incidents/${encodeURIComponent(id)}/correlated-events`).catch(() => null),
         request(`/incidents/${encodeURIComponent(id)}/root-cause-analysis`).catch(() => null),
       ]);
@@ -377,12 +588,46 @@ export default function IncidentDetail({
       if (corrRes) setCorrelatedData(corrRes);
       if (rcaRes) setRootCauseAnalysis(rcaRes);
       onIncidentUpdated?.(incident);
-    } catch (error) {
-      setLoadError(error.message || "Investigation failed.");
-    } finally {
+
+      // Successfully finished: stop loader and render results
       setInvestigating(false);
+      setInvestigationError("");
+      setSelectedRunId(clientRunId);
+    } catch (error) {
+      clearTimeout(timeoutId);
+      const isTimeout =
+        controller.signal.aborted ||
+        error.name === "AbortError" ||
+        String(error).toLowerCase().includes("timeout");
+
+      const msg = isTimeout
+        ? "Investigation request timed out after 60 seconds. The backend may still be processing, or the connection stalled."
+        : (error.message || "Investigation failed to execute.");
+
+      setInvestigationError(msg);
+      setInvestigating(false);
+    } finally {
+      clearTimeout(timeoutId);
+      abortControllerRef.current = null;
     }
   }
+
+  // Trigger automated investigation if requested on initial entry
+  useEffect(() => {
+    if (autoInvestigate && !hasAutoTriggeredRef.current && id) {
+      hasAutoTriggeredRef.current = true;
+      startInvestigation();
+    }
+  }, [autoInvestigate, id]);
+
+  // Cleanup abort controller on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   // 1. Missing or invalid ID error state
   if (!id) {
@@ -463,14 +708,25 @@ export default function IncidentDetail({
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          {!closed && inc.source === "human" && steps.length === 0 && (
+          {!closed && (
             <button
               className="primary-button"
               disabled={investigating}
               onClick={startInvestigation}
+              title={investigating ? "Investigation in progress" : "Run AI investigation"}
             >
-              <SearchIcon size={14} />
-              <span>{investigating ? "Investigating…" : "Investigate with Copilot"}</span>
+              {investigating ? (
+                <RefreshCwIcon size={14} className="spin" />
+              ) : (
+                <SearchIcon size={14} />
+              )}
+              <span>
+                {investigating
+                  ? "Investigating…"
+                  : steps.length === 0
+                  ? "Investigate with Copilot"
+                  : "Re-run Investigation"}
+              </span>
             </button>
           )}
           <span className="timeline-count">
@@ -478,6 +734,18 @@ export default function IncidentDetail({
           </span>
         </div>
       </div>
+
+      {/* ---------------- Polished Real-Time Investigation Progress UI ---------------- */}
+      {(investigating || investigationError) && (
+        <InvestigationProgress
+          currentStageKey={currentStageKey}
+          stagesData={investigationStages}
+          startTime={investigationStartTime}
+          error={investigationError}
+          onRetry={startInvestigation}
+          isStreaming={isStreaming}
+        />
+      )}
 
       {loadError && (
         <div className="notice error-notice" role="alert">
@@ -853,12 +1121,68 @@ export default function IncidentDetail({
           <div className="timeline-header">
             <div>
               <h3>AI Investigation Activity</h3>
-              <p>Completed tool executions with result evidence and stable execution pairing.</p>
+              <p>Historical investigation runs with verified evidence and stable execution pairing.</p>
             </div>
-            <span className="timeline-count">
-              {visibleSteps.length} INVESTIGATION STEPS
-            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              {groupedRuns.length > 1 && (
+                <span className="run-count-badge">
+                  {groupedRuns.length} RUNS
+                </span>
+              )}
+              <span className="timeline-count">
+                {visibleSteps.length} INVESTIGATION STEPS
+              </span>
+            </div>
           </div>
+
+          {/* Active in-progress banner */}
+          {investigating && (
+            <div className="active-run-banner" role="status">
+              <RefreshCwIcon size={18} className="spin" style={{ color: "var(--brand-primary)" }} />
+              <div className="active-run-banner-content">
+                <strong>Investigation in Progress</strong>
+                <p>Running live diagnostic pipeline and streaming verified evidence for the latest run...</p>
+              </div>
+            </div>
+          )}
+
+          {/* Run switcher toolbar when multiple runs exist */}
+          {groupedRuns.length > 1 && (
+            <div className="run-selector-toolbar">
+              <span className="run-selector-label">Investigation Runs:</span>
+              <div className="run-selector-pills">
+                {groupedRuns.map((run) => {
+                  const isActive =
+                    (selectedRunId === null && run.isLatest) ||
+                    (selectedRunId === "latest" && run.isLatest) ||
+                    selectedRunId === run.runId;
+
+                  return (
+                    <button
+                      key={run.runId}
+                      type="button"
+                      className={`run-pill-btn ${isActive ? "active" : ""} ${run.isLatest ? "latest" : ""}`}
+                      onClick={() => setSelectedRunId(run.runId)}
+                      title={`View steps for ${run.label}`}
+                    >
+                      <span className="run-pill-dot" />
+                      <span>{run.label}</span>
+                      <span className="run-pill-count">{run.steps.length}</span>
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  className={`run-pill-btn ${selectedRunId === "all" ? "active" : ""}`}
+                  onClick={() => setSelectedRunId("all")}
+                  title="View all investigation runs in historical sequence"
+                >
+                  <span>All Runs</span>
+                  <span className="run-pill-count">{visibleSteps.length}</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           {visibleSteps.length === 0 ? (
             <div className="empty-state">
@@ -866,48 +1190,75 @@ export default function IncidentDetail({
             </div>
           ) : (
             <>
-              <div className="timeline-grid">
-                {visibleSteps.map((step, index) => {
-                  const event = getEventDetails(step);
-                  const IconComponent = event.icon;
-                  const stepKey = getStepKey(step, index);
-                  const selected = selectedEvent === stepKey;
-                  const summary = getStepSummary(step);
-
-                  return (
-                    <button
-                      type="button"
-                      key={stepKey}
-                      className={`timeline-event-card ${selected ? "selected" : ""}`}
-                      onClick={() => setSelectedEvent(selected ? null : stepKey)}
-                    >
-                      <span className="timeline-event-icon">
-                        <IconComponent size={14} />
+              {displayedRuns.map((run) => (
+                <div key={run.runId} className="investigation-run-group">
+                  <div className="run-group-header">
+                    <div className="run-group-identity">
+                      <span className={`run-badge ${run.isLatest ? "latest" : "historical"}`}>
+                        {run.isLatest ? "LATEST RUN" : `RUN #${run.runNumber}`}
                       </span>
+                      <code className="run-id-pill">{run.runId}</code>
+                      <span className={`run-status-tag ${run.status}`}>
+                        {run.status === "completed"
+                          ? "Completed"
+                          : run.status === "in_progress"
+                          ? "In Progress"
+                          : "Failed"}
+                      </span>
+                    </div>
+                    <div className="run-group-meta">
+                      <span>Started: {formatTimestamp(run.startedAt)}</span>
+                      {run.completedAt && (
+                        <span>Finished: {formatTimestamp(run.completedAt)}</span>
+                      )}
+                      <span className="run-step-badge">{run.steps.length} step(s)</span>
+                    </div>
+                  </div>
 
-                      <div className="timeline-event-body">
-                        <strong>{event.title}</strong>
-                        {summary && (
-                          <span className="timeline-event-summary">{summary}</span>
-                        )}
-                        <div className="timeline-event-meta">
-                          <span className="timeline-event-time">
-                            {formatTimestamp(step.ts)}
+                  <div className="timeline-grid">
+                    {run.steps.map((step, index) => {
+                      const event = getEventDetails(step);
+                      const IconComponent = event.icon;
+                      const stepKey = getStepKey(step, index);
+                      const selected = selectedEvent === stepKey;
+                      const summary = getStepSummary(step);
+
+                      return (
+                        <button
+                          type="button"
+                          key={stepKey}
+                          className={`timeline-event-card ${selected ? "selected" : ""}`}
+                          onClick={() => setSelectedEvent(selected ? null : stepKey)}
+                        >
+                          <span className="timeline-event-icon">
+                            <IconComponent size={14} />
                           </span>
-                          {step.execution_id && (
-                            <code className="kbd-shortcut">
-                              id: {String(step.execution_id).slice(0, 8)}
-                            </code>
-                          )}
-                          <span className="timeline-event-action">
-                            {selected ? "Close inspection" : "Inspect evidence →"}
-                          </span>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+
+                          <div className="timeline-event-body">
+                            <strong>{event.title}</strong>
+                            {summary && (
+                              <span className="timeline-event-summary">{summary}</span>
+                            )}
+                            <div className="timeline-event-meta">
+                              <span className="timeline-event-time">
+                                {formatTimestamp(step.ts)}
+                              </span>
+                              {step.execution_id && (
+                                <code className="kbd-shortcut">
+                                  id: {String(step.execution_id).slice(-8)}
+                                </code>
+                              )}
+                              <span className="timeline-event-action">
+                                {selected ? "Close inspection" : "Inspect evidence →"}
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
 
               {/* Slide-over Evidence Inspector */}
               {selectedEvent !== null &&
@@ -933,7 +1284,14 @@ export default function IncidentDetail({
                         <h4>{event.title}</h4>
                       </div>
 
-                      <p className="muted">{formatTimestamp(step.ts)}</p>
+                      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "8px" }}>
+                        <span className="muted">{formatTimestamp(step.ts)}</span>
+                        {step.run_id && (
+                          <span className="run-id-pill" style={{ fontSize: "11px" }}>
+                            {step.run_id}
+                          </span>
+                        )}
+                      </div>
 
                       {summary && (
                         <div className="timeline-evidence-block">

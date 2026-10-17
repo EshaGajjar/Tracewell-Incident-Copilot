@@ -1,17 +1,20 @@
 """FastAPI service for Tracewell Incident Copilot (Priority 1)."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import CORS_ORIGINS, GCP_PROJECT, GCP_REGION
-from .agent import run_investigation
+from .agent import run_investigation, run_investigation_generator, INVESTIGATION_STAGES
 from .store import (
     get_db,
     get_incident,
@@ -59,11 +62,16 @@ app.add_middleware(
 
 
 # -------------------------------------------------------------------
-# Request models
+# Request models & concurrency controls
 # -------------------------------------------------------------------
+
+_active_investigations: set[str] = set()
+_active_investigations_lock = threading.Lock()
+
 
 class InvestigateRequest(BaseModel):
     incident_id: str = Field(min_length=1, max_length=180)
+    run_id: str | None = Field(default=None, max_length=120)
 
 
 class CreateIncidentRequest(BaseModel):
@@ -153,7 +161,9 @@ def get_incident_route(incident_id: str) -> dict[str, Any]:
 def get_incident_steps(
     incident_id: str,
     raw: bool = False,
-) -> list[dict[str, Any]]:
+    run_id: str | None = None,
+    group_by_run: bool = False,
+) -> Any:
     if not get_incident(incident_id):
         raise HTTPException(
             status_code=404,
@@ -162,11 +172,19 @@ def get_incident_steps(
 
     steps = list_steps(incident_id)
     if raw:
+        if run_id:
+            return [s for s in steps if s.get("run_id") == run_id]
         return steps
 
-    from .timeline import filter_timeline_steps
+    from .timeline import filter_timeline_steps, group_steps_by_run
 
-    return filter_timeline_steps(steps)
+    if group_by_run:
+        return group_steps_by_run(steps)
+
+    filtered = filter_timeline_steps(steps)
+    if run_id:
+        return [s for s in filtered if s.get("run_id") == run_id]
+    return filtered
 
 
 @app.post("/incidents")
@@ -500,21 +518,32 @@ def ingest_incident_events(
 @app.post("/investigate")
 async def investigate(request: InvestigateRequest) -> dict[str, Any]:
     """Run an ADK investigation and persist its findings."""
-    try:
-        from .ingestion import ingest_operational_events_for_incident
+    with _active_investigations_lock:
+        if request.incident_id in _active_investigations:
+            raise HTTPException(
+                status_code=409,
+                detail=f"An investigation is already in progress for incident '{request.incident_id}'",
+            )
+        _active_investigations.add(request.incident_id)
 
-        ingest_operational_events_for_incident(request.incident_id)
-    except Exception as exc:
-        logger.warning("Auto-ingestion prior to investigation encountered: %s", exc)
-
     try:
-        return await run_investigation(request.incident_id)
+        try:
+            from .ingestion import ingest_operational_events_for_incident
+
+            ingest_operational_events_for_incident(request.incident_id)
+        except Exception as exc:
+            logger.warning("Auto-ingestion prior to investigation encountered: %s", exc)
+
+        return await run_investigation(request.incident_id, run_id=request.run_id)
 
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
             detail=str(exc),
         ) from exc
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         logger.exception(
@@ -526,12 +555,90 @@ async def investigate(request: InvestigateRequest) -> dict[str, Any]:
             status_code=500,
             detail=f"Investigation failed: {type(exc).__name__}",
         ) from exc
+    finally:
+        with _active_investigations_lock:
+            _active_investigations.discard(request.incident_id)
 
 
 @app.post("/incidents/{incident_id}/investigate")
-async def investigate_by_path(incident_id: str) -> dict[str, Any]:
+async def investigate_by_path(
+    incident_id: str,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """Run an investigation for an incident specified by path."""
-    return await investigate(InvestigateRequest(incident_id=incident_id))
+    return await investigate(InvestigateRequest(incident_id=incident_id, run_id=run_id))
+
+
+@app.get("/investigation/stages")
+def get_investigation_stages() -> list[dict[str, Any]]:
+    """Return the ordered list of canonical investigation stages."""
+    return INVESTIGATION_STAGES
+
+
+@app.get("/incidents/{incident_id}/investigate/stream")
+async def investigate_stream(
+    incident_id: str,
+    run_id: str | None = None,
+):
+    """Stream real-time investigation stages using Server-Sent Events (SSE)."""
+    incident = get_incident(incident_id)
+    if not incident:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Incident {incident_id!r} was not found",
+        )
+
+    with _active_investigations_lock:
+        if incident_id in _active_investigations:
+            raise HTTPException(
+                status_code=409,
+                detail=f"An investigation is already in progress for incident '{incident_id}'",
+            )
+        _active_investigations.add(incident_id)
+
+    async def event_generator():
+        import json
+        try:
+            from .ingestion import ingest_operational_events_for_incident
+            try:
+                ingest_operational_events_for_incident(incident_id)
+            except Exception as exc:
+                logger.warning("Auto-ingestion prior to stream encountered: %s", exc)
+
+            async for event in run_investigation_generator(incident_id, run_id=run_id):
+                yield f"data: {json.dumps(event, default=str)}\n\n"
+        except Exception as exc:
+            logger.exception("Investigation stream encountered error for incident %s", incident_id)
+            err_payload = {
+                "stage": "error",
+                "status": "failed",
+                "label": "Investigation failed",
+                "message": f"Investigation failed: {type(exc).__name__}: {str(exc)}",
+            }
+            yield f"data: {json.dumps(err_payload, default=str)}\n\n"
+        finally:
+            with _active_investigations_lock:
+                _active_investigations.discard(incident_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/incidents/{incident_id}/investigate/stream")
+async def investigate_stream_post(
+    incident_id: str,
+    run_id: str | None = None,
+):
+    """Allow streaming via POST for environments where GET with body is discouraged."""
+    return await investigate_stream(incident_id, run_id=run_id)
+
 
 
 # -------------------------------------------------------------------

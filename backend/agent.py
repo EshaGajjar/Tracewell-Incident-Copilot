@@ -43,18 +43,120 @@ def _text_from_event(event: Any) -> str:
     return "\n".join(str(getattr(part, "text", "")) for part in parts if getattr(part, "text", None))
 
 
-async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) -> dict[str, Any]:
-    """Transparent offline path. It gathers corpus evidence and evaluates local telemetry without live cloud dependencies."""
+import os
+
+INVESTIGATION_STAGES = [
+    {
+        "key": "retrieving_details",
+        "label": "Retrieving incident details",
+        "description": "Loading incident scope, affected service, and reporter inputs.",
+    },
+    {
+        "key": "collecting_events",
+        "label": "Collecting operational events",
+        "description": "Querying deployments, error logs, and health check signals.",
+    },
+    {
+        "key": "correlating_events",
+        "label": "Correlating logs and deployment events",
+        "description": "Aligning temporal anomalies and matching against known patterns.",
+    },
+    {
+        "key": "analyzing_dependencies",
+        "label": "Analyzing service dependencies",
+        "description": "Evaluating topology, upstream callers, and downstream cascade risks.",
+    },
+    {
+        "key": "evaluating_hypotheses",
+        "label": "Evaluating root-cause hypotheses",
+        "description": "Scoring candidate fault hypotheses against observable evidence.",
+    },
+    {
+        "key": "preparing_diagnosis",
+        "label": "Preparing the evidence-backed diagnosis",
+        "description": "Synthesizing root cause findings and recommended remediation.",
+    },
+]
+
+
+async def run_investigation_generator(incident_id: str, run_id: str | None = None):
+    """Asynchronous generator yielding real-time investigation stages based on actual backend execution."""
+    incident = get_incident(incident_id)
+    if not incident:
+        raise KeyError(f"Incident {incident_id!r} was not found")
+
+    if not run_id:
+        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+    is_testing = bool(os.getenv("PYTEST_CURRENT_TEST"))
+    delay = 0.0 if is_testing else 0.35
+
+    # -------------------------------------------------------------
+    # Stage 1: Retrieving incident details
+    # -------------------------------------------------------------
+    yield {
+        "run_id": run_id,
+        "stage": "retrieving_details",
+        "stage_index": 0,
+        "total_stages": 6,
+        "label": "Retrieving incident details",
+        "status": "in_progress",
+        "message": f"Verifying incident record and service metadata for '{incident_id}'...",
+    }
+
+    update_incident(incident_id, {"status": "investigating", "current_run_id": run_id})
+    append_step(
+        incident_id,
+        step_type="message",
+        tool="investigation",
+        input_data={"incident_id": incident_id},
+        output_data="Investigation started.",
+        run_id=run_id,
+    )
+
     service = incident.get("service") or "payment-api"
+    severity = incident.get("severity") or "SEV3"
+    category = incident.get("category") or "unknown"
     description = f"{incident.get('title','')} {incident.get('description','')} service={service}"
 
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    yield {
+        "run_id": run_id,
+        "stage": "retrieving_details",
+        "stage_index": 0,
+        "total_stages": 6,
+        "label": "Retrieving incident details",
+        "status": "completed",
+        "message": f"Loaded incident metadata for service '{service}' (Severity: {severity})",
+        "data": {"service": service, "severity": severity, "category": category},
+    }
+
+    # -------------------------------------------------------------
+    # Stage 2: Collecting operational events
+    # -------------------------------------------------------------
+    yield {
+        "run_id": run_id,
+        "stage": "collecting_events",
+        "stage_index": 1,
+        "total_stages": 6,
+        "label": "Collecting operational events",
+        "status": "in_progress",
+        "message": f"Collecting deployment revisions, error logs, and health checks for '{service}'...",
+    }
+
     from .store import list_operational_events
-    from .root_cause import perform_root_cause_analysis
+    from .ingestion import ingest_operational_events_for_incident
+    try:
+        ingest_operational_events_for_incident(incident_id)
+    except Exception as exc:
+        pass
 
     local_events = list_operational_events(incident_id)
 
     # 1. Deployment tool execution
-    dep_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    dep_exec_id = f"{run_id}_dep_{uuid.uuid4().hex[:6]}"
     append_step(
         incident_id,
         step_type="tool_call",
@@ -62,6 +164,7 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         input_data={"service": service},
         output_data={"status": "started"},
         execution_id=dep_exec_id,
+        run_id=run_id,
     )
     dep_events = [ev for ev in local_events if ev.get("event_type") == "deployment"]
     if dep_events:
@@ -75,10 +178,11 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         input_data={"service": service},
         output_data=deployments,
         execution_id=dep_exec_id,
+        run_id=run_id,
     )
 
     # 2. Logs tool execution
-    log_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    log_exec_id = f"{run_id}_log_{uuid.uuid4().hex[:6]}"
     append_step(
         incident_id,
         step_type="tool_call",
@@ -86,6 +190,7 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         input_data={"service": service, "minutes": 30},
         output_data={"status": "started"},
         execution_id=log_exec_id,
+        run_id=run_id,
     )
     log_events = [ev for ev in local_events if ev.get("event_type") == "error_log"]
     if log_events:
@@ -99,50 +204,11 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         input_data={"service": service, "minutes": 30},
         output_data=logs,
         execution_id=log_exec_id,
+        run_id=run_id,
     )
 
-    # 3. Knowledge base search tool execution
-    kb_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
-    append_step(
-        incident_id,
-        step_type="tool_call",
-        tool="search_knowledge",
-        input_data={"query": description},
-        output_data={"status": "started"},
-        execution_id=kb_exec_id,
-    )
-    knowledge = search_knowledge(description)
-    append_step(
-        incident_id,
-        step_type="tool_result",
-        tool="search_knowledge",
-        input_data={"query": description},
-        output_data=knowledge,
-        execution_id=kb_exec_id,
-    )
-
-    # 4. Past incidents search tool execution
-    past_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
-    append_step(
-        incident_id,
-        step_type="tool_call",
-        tool="search_past_incidents",
-        input_data={"query": description},
-        output_data={"status": "started"},
-        execution_id=past_exec_id,
-    )
-    incidents = search_past_incidents(description)
-    append_step(
-        incident_id,
-        step_type="tool_result",
-        tool="search_past_incidents",
-        input_data={"query": description},
-        output_data=incidents,
-        execution_id=past_exec_id,
-    )
-
-    # 5. Health check tool execution
-    hc_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    # 3. Health check tool execution
+    hc_exec_id = f"{run_id}_hc_{uuid.uuid4().hex[:6]}"
     append_step(
         incident_id,
         step_type="tool_call",
@@ -150,6 +216,7 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         input_data={"service": service},
         output_data={"status": "started"},
         execution_id=hc_exec_id,
+        run_id=run_id,
     )
     health_events = [ev for ev in local_events if ev.get("event_type") == "health_check"]
     if health_events:
@@ -163,12 +230,192 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         input_data={"service": service},
         output_data=health,
         execution_id=hc_exec_id,
+        run_id=run_id,
     )
 
-    # 6. Run evidence-based deterministic root cause analysis
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    yield {
+        "run_id": run_id,
+        "stage": "collecting_events",
+        "stage_index": 1,
+        "total_stages": 6,
+        "label": "Collecting operational events",
+        "status": "completed",
+        "message": f"Collected {len(local_events)} operational events ({len(dep_events)} deployments, {len(log_events)} error logs, {len(health_events)} health checks)",
+        "data": {"count": len(local_events), "deployments": len(dep_events), "error_logs": len(log_events)},
+    }
+
+    # -------------------------------------------------------------
+    # Stage 3: Correlating logs and deployment events
+    # -------------------------------------------------------------
+    yield {
+        "run_id": run_id,
+        "stage": "correlating_events",
+        "stage_index": 2,
+        "total_stages": 6,
+        "label": "Correlating logs and deployment events",
+        "status": "in_progress",
+        "message": "Correlating error logs with deployment revisions and searching historical runbooks...",
+    }
+
+    kb_exec_id = f"{run_id}_kb_{uuid.uuid4().hex[:6]}"
+    append_step(
+        incident_id,
+        step_type="tool_call",
+        tool="search_knowledge",
+        input_data={"query": description},
+        output_data={"status": "started"},
+        execution_id=kb_exec_id,
+        run_id=run_id,
+    )
+    knowledge = search_knowledge(description)
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="search_knowledge",
+        input_data={"query": description},
+        output_data=knowledge,
+        execution_id=kb_exec_id,
+        run_id=run_id,
+    )
+
+    past_exec_id = f"{run_id}_past_{uuid.uuid4().hex[:6]}"
+    append_step(
+        incident_id,
+        step_type="tool_call",
+        tool="search_past_incidents",
+        input_data={"query": description},
+        output_data={"status": "started"},
+        execution_id=past_exec_id,
+        run_id=run_id,
+    )
+    incidents = search_past_incidents(description)
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="search_past_incidents",
+        input_data={"query": description},
+        output_data=incidents,
+        execution_id=past_exec_id,
+        run_id=run_id,
+    )
+
+    from .correlation import correlate_events_for_incident
+    corr_res = correlate_events_for_incident(incident_id)
+    corr_events = getattr(corr_res, "correlated_events", None) or []
+    corr_count = len(corr_events)
+
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    yield {
+        "run_id": run_id,
+        "stage": "correlating_events",
+        "stage_index": 2,
+        "total_stages": 6,
+        "label": "Correlating logs and deployment events",
+        "status": "completed",
+        "message": f"Correlated {corr_count} events with deployments ({len(knowledge.get('results', []))} runbooks matched)",
+        "data": {"correlated_count": corr_count, "knowledge_results": len(knowledge.get("results", []))},
+    }
+
+    # -------------------------------------------------------------
+    # Stage 4: Analyzing service dependencies
+    # -------------------------------------------------------------
+    yield {
+        "run_id": run_id,
+        "stage": "analyzing_dependencies",
+        "stage_index": 3,
+        "total_stages": 6,
+        "label": "Analyzing service dependencies",
+        "status": "in_progress",
+        "message": f"Mapping upstream callers and downstream service blast radius for '{service}'...",
+    }
+
+    from .dependencies import get_service_dependencies, analyze_downstream_impact
+    deps = get_service_dependencies(service)
+    downstream = analyze_downstream_impact(service)
+    upstream_list = deps.get("upstream", [])
+    downstream_list = downstream.get("downstream_services", [])
+
+    dep_step_id = f"{run_id}_topo_{uuid.uuid4().hex[:6]}"
+    append_step(
+        incident_id,
+        step_type="tool_result",
+        tool="analyze_service_dependencies",
+        input_data={"service": service},
+        output_data={
+            "upstream_services": upstream_list,
+            "downstream_services": downstream_list,
+            "direct_dependents": downstream.get("direct_dependents", []),
+        },
+        execution_id=dep_step_id,
+        run_id=run_id,
+    )
+
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    yield {
+        "run_id": run_id,
+        "stage": "analyzing_dependencies",
+        "stage_index": 3,
+        "total_stages": 6,
+        "label": "Analyzing service dependencies",
+        "status": "completed",
+        "message": f"Mapped topology dependencies: {len(upstream_list)} upstream callers and {len(downstream_list)} downstream services",
+        "data": {"upstream": len(upstream_list), "downstream": len(downstream_list)},
+    }
+
+    # -------------------------------------------------------------
+    # Stage 5: Evaluating root-cause hypotheses
+    # -------------------------------------------------------------
+    yield {
+        "run_id": run_id,
+        "stage": "evaluating_hypotheses",
+        "stage_index": 4,
+        "total_stages": 6,
+        "label": "Evaluating root-cause hypotheses",
+        "status": "in_progress",
+        "message": "Evaluating root-cause hypotheses against evidence graph...",
+    }
+
+    from .root_cause import perform_root_cause_analysis
     rca_res = await perform_root_cause_analysis(incident_id, force_refresh=True)
 
     top_hyp = rca_res.hypotheses[0] if rca_res.hypotheses else None
+    top_conf = getattr(top_hyp, "confidence", "Possible") if top_hyp else "Possible"
+    hyp_count = len(rca_res.hypotheses)
+
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    yield {
+        "run_id": run_id,
+        "stage": "evaluating_hypotheses",
+        "stage_index": 4,
+        "total_stages": 6,
+        "label": "Evaluating root-cause hypotheses",
+        "status": "completed",
+        "message": f"Evaluated {hyp_count} candidate hypotheses (top candidate confidence: {top_conf})",
+        "data": {"hypotheses_count": hyp_count, "top_confidence": top_conf},
+    }
+
+    # -------------------------------------------------------------
+    # Stage 6: Preparing the evidence-backed diagnosis
+    # -------------------------------------------------------------
+    yield {
+        "run_id": run_id,
+        "stage": "preparing_diagnosis",
+        "stage_index": 5,
+        "total_stages": 6,
+        "label": "Preparing the evidence-backed diagnosis",
+        "status": "in_progress",
+        "message": "Synthesizing evidence-backed diagnosis and preparing remediation action...",
+    }
+
     cause = top_hyp.explanation if top_hyp else "Insufficient evidence to determine root cause."
     strength = "Possible"
 
@@ -187,8 +434,6 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         action = "Review the latest revision configuration and consider rollback to the last known-good revision after verifying the target."
     elif top_hyp and top_hyp.recommended_verification_steps:
         action = top_hyp.recommended_verification_steps[0]
-    category = incident.get("category") or "unknown"
-    severity = incident.get("severity") or "SEV3"
 
     diagnosis = {
         "root_cause": cause,
@@ -206,6 +451,7 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
             "category": category,
             "severity": severity,
             "root_cause": cause,
+            "current_run_id": run_id,
             "status": "awaiting_approval" if action else "investigating",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -231,7 +477,7 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         ]
         update_incident(incident_id, {"pending_action": pending, "action_history": history, "status": "awaiting_approval"})
 
-    diag_exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    diag_exec_id = f"{run_id}_diag_{uuid.uuid4().hex[:6]}"
     append_step(
         incident_id,
         step_type="tool_result",
@@ -239,6 +485,7 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         input_data={},
         output_data={"saved": True, "diagnosis": diagnosis},
         execution_id=diag_exec_id,
+        run_id=run_id,
     )
 
     append_step(
@@ -247,9 +494,11 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         tool="investigation_completed",
         input_data={},
         output_data="Investigation completed successfully.",
+        run_id=run_id,
     )
 
-    return {
+    final_result = {
+        "run_id": run_id,
         "status": "awaiting_approval" if action else "investigating",
         "mode": "local_fallback",
         "diagnosis": diagnosis,
@@ -258,21 +507,66 @@ async def _fallback_investigation(incident_id: str, incident: dict[str, Any]) ->
         "past_incident_results": len(incidents.get("results", [])),
     }
 
+    if delay > 0:
+        await asyncio.sleep(0.2)
 
-async def run_investigation(incident_id: str) -> dict[str, Any]:
+    yield {
+        "run_id": run_id,
+        "stage": "preparing_diagnosis",
+        "stage_index": 5,
+        "total_stages": 6,
+        "label": "Preparing the evidence-backed diagnosis",
+        "status": "completed",
+        "message": "Evidence-backed diagnosis and remediation action prepared",
+        "data": {"status": final_result["status"], "has_action": bool(action)},
+    }
+
+    # Final completion event
+    yield {
+        "run_id": run_id,
+        "stage": "complete",
+        "status": "completed",
+        "label": "Investigation complete",
+        "message": "Investigation completed successfully.",
+        "result": final_result,
+    }
+
+
+async def _fallback_investigation(
+    incident_id: str,
+    incident: dict[str, Any],
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Compatibility runner consuming run_investigation_generator."""
+    final_result = None
+    async for event in run_investigation_generator(incident_id, run_id=run_id):
+        if event.get("stage") == "complete":
+            final_result = event.get("result")
+        elif event.get("status") == "failed":
+            raise RuntimeError(event.get("message", "Investigation failed"))
+    if final_result is not None:
+        return final_result
+    updated = get_incident(incident_id) or {}
+    return {
+        "run_id": run_id,
+        "status": updated.get("status", "investigating"),
+        "diagnosis": updated.get("diagnosis", {}),
+    }
+
+
+async def run_investigation(incident_id: str, run_id: str | None = None) -> dict[str, Any]:
     incident = get_incident(incident_id)
     if not incident:
         raise KeyError(f"Incident {incident_id!r} was not found")
-    update_incident(incident_id, {"status": "investigating"})
-    append_step(
-        incident_id,
-        step_type="message",
-        tool="investigation",
-        input_data={"incident_id": incident_id},
-        output_data="Investigation started.",
-    )
+
+    if not run_id:
+        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+    update_incident(incident_id, {"status": "investigating", "current_run_id": run_id})
+
     if not GCP_PROJECT and LOCAL_FALLBACK:
-        return await _fallback_investigation(incident_id, incident)
+        return await _fallback_investigation(incident_id, incident, run_id=run_id)
+
     try:
         from google.adk.agents import Agent
         from google.adk.runners import Runner
@@ -284,12 +578,21 @@ async def run_investigation(incident_id: str) -> dict[str, Any]:
                 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", GCP_PROJECT)
             os.environ.setdefault("GOOGLE_CLOUD_LOCATION", GCP_REGION)
             os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
-        agent = Agent(name="tracewell_incident_investigator", model=GEMINI_MODEL, instruction=INSTRUCTION, tools=build_tools(incident_id))
+        agent = Agent(name="tracewell_incident_investigator", model=GEMINI_MODEL, instruction=INSTRUCTION, tools=build_tools(incident_id, run_id=run_id))
         sessions = InMemorySessionService()
-        session_id = f"incident-{incident_id}"
+        session_id = f"incident-{incident_id}-{run_id}"
         user_id = "tracewell-api"
         await sessions.create_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
         runner = Runner(agent=agent, app_name=APP_NAME, session_service=sessions)
+
+        append_step(
+            incident_id,
+            step_type="message",
+            tool="investigation",
+            input_data={"incident_id": incident_id},
+            output_data="Investigation started.",
+            run_id=run_id,
+        )
         message = f"Investigate this incident ID {incident_id}. Incident JSON: {json.dumps(incident, default=str)[:8000]}"
         events_seen = 0
         final_text = ""
@@ -299,28 +602,26 @@ async def run_investigation(incident_id: str) -> dict[str, Any]:
             text = _text_from_event(event)
             if text:
                 final_text = text
-                append_step(incident_id, step_type="message", tool="agent", input_data={}, output_data=text[:4000])
+                append_step(incident_id, step_type="message", tool="agent", input_data={}, output_data=text[:4000], run_id=run_id)
             if events_seen >= MAX_AGENT_STEPS * 4:
-                append_step(incident_id, step_type="message", tool="agent", input_data={}, output_data="Stopped consuming ADK events at the configured safety limit.")
+                append_step(incident_id, step_type="message", tool="agent", input_data={}, output_data="Stopped consuming ADK events at the configured safety limit.", run_id=run_id)
                 break
         updated = get_incident(incident_id) or {}
         if not updated.get("diagnosis"):
-            append_step(incident_id, step_type="message", tool="agent", input_data={}, output_data="Agent finished without submitting a structured diagnosis.")
+            append_step(incident_id, step_type="message", tool="agent", input_data={}, output_data="Agent finished without submitting a structured diagnosis.", run_id=run_id)
             update_incident(incident_id, {"status":"failed"})
-            return {"status":"failed", "reason":"Agent did not call submit_diagnosis", "agent_output":final_text}
-        return {"status":updated.get("status", "investigating"), "mode":"adk", "agent_output":final_text}
+            return {"run_id": run_id, "status":"failed", "reason":"Agent did not call submit_diagnosis", "agent_output":final_text}
+        return {"run_id": run_id, "status":updated.get("status", "investigating"), "mode":"adk", "agent_output":final_text}
     except (ImportError, ModuleNotFoundError) as exc:
-        result = await _fallback_investigation(incident_id, incident)
+        result = await _fallback_investigation(incident_id, incident, run_id=run_id)
         result["fallback_reason"] = f"ADK dependency unavailable: {type(exc).__name__}"
-        return {"status":"awaiting_approval" if result.get("pending_action") else "investigating", **result}
+        return {"run_id": run_id, "status":"awaiting_approval" if result.get("pending_action") else "investigating", **result}
     except Exception as exc:
-        # In a configured environment, don't silently hide a model/ADK failure behind
-        # a made-up diagnosis. Fall back only if the caller explicitly permits it.
         import os
         if os.getenv("TRACEWELL_ALLOW_AGENT_FALLBACK", "true").lower() == "true":
-            result = await _fallback_investigation(incident_id, incident)
+            result = await _fallback_investigation(incident_id, incident, run_id=run_id)
             result["fallback_reason"] = f"ADK run failed: {type(exc).__name__}"
-            return {"status":"awaiting_approval" if result.get("pending_action") else "investigating", **result}
+            return {"run_id": run_id, "status":"awaiting_approval" if result.get("pending_action") else "investigating", **result}
         update_incident(incident_id, {"status":"failed"})
-        append_step(incident_id, step_type="message", tool="investigation_failed", input_data={}, output_data=f"{type(exc).__name__}: {str(exc)[:500]}")
+        append_step(incident_id, step_type="message", tool="investigation_failed", input_data={}, output_data=f"{type(exc).__name__}: {str(exc)[:500]}", run_id=run_id)
         raise

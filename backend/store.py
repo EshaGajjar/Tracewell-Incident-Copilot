@@ -267,11 +267,34 @@ def append_step(
     input_data: Any,
     output_data: Any,
     execution_id: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     db = get_db()
 
     if db is None:
         with _lock, _connect_local() as conn:
+            # Idempotency check: if execution_id is provided, check for existing identical execution step
+            if execution_id:
+                existing_rows = conn.execute(
+                    """
+                    SELECT payload FROM steps WHERE incident_id = ?
+                    """,
+                    (incident_id,),
+                ).fetchall()
+                for r in existing_rows:
+                    try:
+                        p = json.loads(r["payload"])
+                        if (
+                            p.get("execution_id") == execution_id
+                            and p.get("type") == step_type
+                            and p.get("tool") == tool
+                            and (not run_id or p.get("run_id") == run_id)
+                        ):
+                            # Retried or duplicate call for exact same execution; return existing
+                            return p
+                    except Exception:
+                        pass
+
             row = conn.execute(
                 """
                 SELECT COALESCE(MAX(step_index), -1) + 1 AS next_idx
@@ -290,6 +313,7 @@ def append_step(
                 "input": input_data,
                 "output": output_data,
                 "execution_id": execution_id,
+                "run_id": run_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -336,6 +360,8 @@ def append_step(
         }
         if execution_id:
             step_data["execution_id"] = execution_id
+        if run_id:
+            step_data["run_id"] = run_id
 
         transaction.set(ref, step_data)
 
@@ -358,6 +384,8 @@ def append_step(
     }
     if execution_id:
         res["execution_id"] = execution_id
+    if run_id:
+        res["run_id"] = run_id
     return res
 
 

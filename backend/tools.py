@@ -26,9 +26,9 @@ def _stable_key(*parts: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def build_tools(incident_id: str) -> list[Callable]:
+def build_tools(incident_id: str, run_id: str | None = None) -> list[Callable]:
     def recorded(name: str, fn: Callable, args: dict[str, Any]) -> dict[str, Any]:
-        execution_id = f"exec_{uuid.uuid4().hex[:12]}"
+        execution_id = f"{run_id + '_' if run_id else ''}exec_{uuid.uuid4().hex[:12]}"
         append_step(
             incident_id,
             step_type="tool_call",
@@ -36,6 +36,7 @@ def build_tools(incident_id: str) -> list[Callable]:
             input_data=args,
             output_data={"status": "started"},
             execution_id=execution_id,
+            run_id=run_id,
         )
         try:
             result = fn(**args)
@@ -46,6 +47,7 @@ def build_tools(incident_id: str) -> list[Callable]:
                 input_data=args,
                 output_data=result,
                 execution_id=execution_id,
+                run_id=run_id,
             )
             return result
         except Exception as exc:
@@ -57,6 +59,7 @@ def build_tools(incident_id: str) -> list[Callable]:
                 input_data=args,
                 output_data=result,
                 execution_id=execution_id,
+                run_id=run_id,
             )
             return result
 

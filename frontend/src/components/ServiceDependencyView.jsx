@@ -1176,8 +1176,26 @@ export default function ServiceDependencyView({
       )}
 
       {error && (
-        <div className="notice error-notice" role="alert" style={{ marginBottom: "16px" }}>
-          {error}
+        <div
+          className="notice error-notice"
+          role="alert"
+          style={{
+            marginBottom: "16px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "12px",
+          }}
+        >
+          <span>{error}</span>
+          <button
+            type="button"
+            className="secondary-button compact"
+            onClick={loadData}
+            style={{ flexShrink: 0 }}
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -1434,9 +1452,30 @@ export default function ServiceDependencyView({
             style={{ cursor: isDragging ? "grabbing" : "default" }}
           >
             {loading ? (
+              <TopologySkeleton
+                width={containerSize.width}
+                height={containerSize.height}
+              />
+            ) : error && visibleServices.length === 0 ? (
               <div className="timeline-empty">
-                <div className="spinner" style={{ marginBottom: "12px" }} />
-                <p>Loading service dependency graph...</p>
+                <div
+                  style={{
+                    color: "var(--status-error)",
+                    fontSize: "15px",
+                    fontWeight: "600",
+                    marginBottom: "8px",
+                  }}
+                >
+                  Unable to load service map
+                </div>
+                <p style={{ color: "var(--text-muted)", marginBottom: "16px" }}>{error}</p>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={loadData}
+                >
+                  ↺ Retry loading services
+                </button>
               </div>
             ) : visibleServices.length === 0 ? (
               <div className="timeline-empty">
@@ -2032,3 +2071,95 @@ export default function ServiceDependencyView({
     </div>
   );
 }
+
+function TopologySkeleton({ width = 1000, height = 600 }) {
+  const safeW = Math.max(width || 1000, 600);
+  const safeH = Math.max(height || 600, 400);
+
+  // Ghost nodes laid out across tiers
+  const skeletonNodes = [
+    { id: "api-gw", x: safeW * 0.18, y: safeH * 0.48 },
+    { id: "auth", x: safeW * 0.44, y: safeH * 0.28 },
+    { id: "orders", x: safeW * 0.44, y: safeH * 0.52 },
+    { id: "payments", x: safeW * 0.44, y: safeH * 0.74 },
+    { id: "db-orders", x: safeW * 0.74, y: safeH * 0.4 },
+    { id: "cache-redis", x: safeW * 0.74, y: safeH * 0.66 },
+  ];
+
+  const skeletonEdges = [
+    { from: skeletonNodes[0], to: skeletonNodes[1] },
+    { from: skeletonNodes[0], to: skeletonNodes[2] },
+    { from: skeletonNodes[0], to: skeletonNodes[3] },
+    { from: skeletonNodes[2], to: skeletonNodes[4] },
+    { from: skeletonNodes[2], to: skeletonNodes[5] },
+    { from: skeletonNodes[3], to: skeletonNodes[4] },
+  ];
+
+  return (
+    <div className="topology-skeleton-container" aria-label="Loading service topology skeleton">
+      <svg
+        className="topology-skeleton-svg"
+        viewBox={`0 0 ${safeW} ${safeH}`}
+        width="100%"
+        height="100%"
+      >
+        <g className="topology-skeleton-edges">
+          {skeletonEdges.map((edge, idx) => (
+            <line
+              key={idx}
+              x1={edge.from.x}
+              y1={edge.from.y}
+              x2={edge.to.x}
+              y2={edge.to.y}
+              className="topology-skeleton-edge"
+            />
+          ))}
+        </g>
+
+        <g className="topology-skeleton-nodes">
+          {skeletonNodes.map((node) => (
+            <g key={node.id} transform={`translate(${node.x - 70}, ${node.y - 25})`}>
+              <rect
+                width="140"
+                height="50"
+                rx="8"
+                className="topology-skeleton-node-rect"
+              />
+              <circle
+                cx="22"
+                cy="25"
+                r="6"
+                className="topology-skeleton-node-dot"
+              />
+              <rect
+                x="38"
+                y="18"
+                width="80"
+                height="6"
+                rx="3"
+                className="topology-skeleton-node-line"
+              />
+              <rect
+                x="38"
+                y="28"
+                width="48"
+                height="5"
+                rx="2.5"
+                className="topology-skeleton-node-subline"
+              />
+            </g>
+          ))}
+        </g>
+      </svg>
+
+      <div className="topology-skeleton-badge">
+        <span className="topology-skeleton-spinner" aria-hidden="true" />
+        <div className="topology-skeleton-text">
+          <strong>Assembling Service Map</strong>
+          <small>Connecting verified services and mapping health signals…</small>
+        </div>
+      </div>
+    </div>
+  );
+}
+

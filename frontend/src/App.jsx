@@ -17,6 +17,8 @@ import {
   SidebarExpandIcon,
   ActivityIcon,
 } from "./components/Icons.jsx";
+import { TracewellLogo } from "./components/TracewellLogo.jsx";
+import { LaunchScreen } from "./components/LaunchScreen.jsx";
 
 export default function App() {
   const [view, setView] = useState({ name: "list" });
@@ -95,6 +97,9 @@ export default function App() {
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      {/* ---------------- Branded Website Launch Screen ---------------- */}
+      <LaunchScreen isReady={!incidentsLoading} />
+
       {/* ---------------- Collapsible Sidebar ---------------- */}
       <aside className="sidebar">
         <div className="sidebar-brand-row">
@@ -104,9 +109,9 @@ export default function App() {
             aria-label="Tracewell home"
             title="Tracewell Incident Intelligence"
           >
-            <span className="brand-mark">T</span>
+            <TracewellLogo size={28} className="brand-logo" />
             <div className="brand-text">
-              <strong>tracewell</strong>
+              <strong>TRACEWELL</strong>
               <small>Incident Copilot</small>
             </div>
           </button>
@@ -220,7 +225,7 @@ export default function App() {
           </div>
 
           <div className="topbar-right">
-            {/* Dark, Light, System Theme Selector */}
+            {/* Dark and Light Theme Selector */}
             <div
               className="theme-selector"
               role="radiogroup"
@@ -288,30 +293,41 @@ export default function App() {
             </section>
 
             <section className="metrics-grid">
-              <Metric
-                label="TOTAL INCIDENTS"
-                value={incidents.length}
-                detail="All active & historical"
-                tone="blue"
-              />
-              <Metric
-                label="ACTIVE INCIDENTS"
-                value={activeCount}
-                detail="Under triage or investigation"
-                tone="violet"
-              />
-              <Metric
-                label="AWAITING DECISION"
-                value={awaiting}
-                detail="Human approval required"
-                tone="amber"
-              />
-              <Metric
-                label="CRITICAL SEVERITY"
-                value={critical}
-                detail="SEV1 · SEV2 needing action"
-                tone="rose"
-              />
+              {incidentsLoading && !incidents.length ? (
+                <>
+                  <MetricSkeleton />
+                  <MetricSkeleton />
+                  <MetricSkeleton />
+                  <MetricSkeleton />
+                </>
+              ) : (
+                <>
+                  <Metric
+                    label="TOTAL INCIDENTS"
+                    value={incidents.length}
+                    detail="All active & historical"
+                    tone="blue"
+                  />
+                  <Metric
+                    label="ACTIVE INCIDENTS"
+                    value={activeCount}
+                    detail="Under triage or investigation"
+                    tone="violet"
+                  />
+                  <Metric
+                    label="AWAITING DECISION"
+                    value={awaiting}
+                    detail="Human approval required"
+                    tone="amber"
+                  />
+                  <Metric
+                    label="CRITICAL SEVERITY"
+                    value={critical}
+                    detail="SEV1 · SEV2 needing action"
+                    tone="rose"
+                  />
+                </>
+              )}
             </section>
 
             <section className="content-panel">
@@ -355,9 +371,13 @@ export default function App() {
               Capture the telemetry signal and let Tracewell assemble the causal graph.
             </p>
             <ReportForm
-              onCreated={async (id) => {
+              onCreated={async (id, options) => {
                 await refreshIncidents();
-                setView({ name: "detail", id });
+                setView({
+                  name: "detail",
+                  id,
+                  autoInvestigate: Boolean(options?.autoInvestigate),
+                });
               }}
             />
           </section>
@@ -375,6 +395,7 @@ export default function App() {
             >
               <IncidentDetail
                 id={view.id}
+                autoInvestigate={view.autoInvestigate}
                 onBack={() => setView({ name: "list" })}
                 onIncidentUpdated={refreshIncidents}
                 onNavigateToDependencies={(serviceName) =>
@@ -414,3 +435,23 @@ function Metric({ label, value, detail, tone }) {
     </article>
   );
 }
+
+function MetricSkeleton() {
+  return (
+    <article className="metric-card skeleton-metric-card" aria-hidden="true">
+      <div className="metric-top">
+        <span className="skeleton-line" style={{ width: "45%", height: "11px" }} />
+        <span
+          className="skeleton-line"
+          style={{ width: "22px", height: "22px", borderRadius: "50%" }}
+        />
+      </div>
+      <div
+        className="skeleton-line"
+        style={{ width: "32%", height: "28px", margin: "10px 0 8px 0" }}
+      />
+      <div className="skeleton-line" style={{ width: "65%", height: "11px" }} />
+    </article>
+  );
+}
+

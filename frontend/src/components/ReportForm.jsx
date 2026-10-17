@@ -68,12 +68,7 @@ export default function ReportForm({ onCreated }) {
       );
       const incidentId = created.incident_id;
 
-      if (askCopilot) {
-        setStage("Running automated Copilot investigation…");
-        await api("/investigate", { incident_id: incidentId }, { timeoutMs: 60000 });
-      }
-
-      onCreated(incidentId);
+      onCreated(incidentId, { autoInvestigate: askCopilot });
     } catch (err) {
       setError(err?.message || "Could not create the incident.");
       setStage("");
