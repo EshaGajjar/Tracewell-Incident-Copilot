@@ -74,19 +74,12 @@ class InvestigateRequest(BaseModel):
     run_id: str | None = Field(default=None, max_length=120)
 
 
-class IncidentAttachmentText(BaseModel):
-    filename: str = Field(min_length=1, max_length=200)
-    content_type: str = Field(default="text/plain", max_length=100)
-    content: str = Field(min_length=1, max_length=12000)
-
-
 class CreateIncidentRequest(BaseModel):
     title: str = Field(min_length=3, max_length=200)
     service: str = Field(min_length=1, max_length=100)
     description: str = Field(min_length=8, max_length=5000)
     severity: str = Field(default="SEV3", max_length=20)
     category: str = Field(default="unknown", max_length=80)
-    attachments: list[IncidentAttachmentText] = Field(default_factory=list, max_length=5)
 
 
 class DecisionRequest(BaseModel):
@@ -196,12 +189,9 @@ def get_incident_steps(
 
 @app.post("/incidents")
 def create_incident(request: CreateIncidentRequest) -> dict[str, Any]:
-    """Create an incident, persist the user's report as evidence, and collect available GCP evidence."""
+    """Create an incident using the configured persistence backend."""
     incident_id = "api_" + uuid.uuid4().hex[:12]
-    attachment_metadata = [
-        {"filename": item.filename, "content_type": item.content_type, "characters": len(item.content)}
-        for item in request.attachments
-    ]
+
     fields = {
         "title": request.title,
         "service": request.service,
@@ -210,9 +200,8 @@ def create_incident(request: CreateIncidentRequest) -> dict[str, Any]:
         "category": request.category,
         "source": "human",
         "status": "open",
-        "attachments": attachment_metadata,
+        "attachments": [],
         "created_at": server_timestamp(),
-        "evidence_collection": {"status": "pending", "events_persisted": 0},
     }
 
     if firestore_available():
@@ -220,69 +209,17 @@ def create_incident(request: CreateIncidentRequest) -> dict[str, Any]:
     else:
         create_local_incident(incident_id, fields)
 
-    # Always preserve the original report as an evidence event. Previously the report
-    # existed only as incident metadata, unlike seeded scenarios which add events.
-    append_operational_event(
-        incident_id,
-        event_type="user_report",
-        service=request.service.strip(),
-        description=f"{request.title.strip()}: {request.description.strip()}",
-        evidence={"source": "manual_report", "severity": request.severity, "category": request.category},
-        dedupe_key="manual-user-report",
-    )
-
-    # Text-based attachments are ingested as explicit evidence events so investigation
-    # tools can retrieve them. The UI limits the number and size of files before submission.
-    for index, attachment in enumerate(request.attachments):
-        append_operational_event(
-            incident_id,
-            event_type="user_attachment",
-            service=request.service.strip(),
-            description=f"Attachment {attachment.filename}:\n{attachment.content[:10000]}",
-            evidence={
-                "source": "user_attachment",
-                "filename": attachment.filename,
-                "content_type": attachment.content_type,
-                "characters": len(attachment.content),
-            },
-            dedupe_key=f"user-attachment-{index}-{uuid.uuid5(uuid.NAMESPACE_URL, attachment.filename).hex[:12]}",
-        )
-
-    ingestion: dict[str, Any]
+    # Automatic ingestion: retrieve and persist existing deployments and error logs for the service
     try:
         from .ingestion import ingest_operational_events_for_incident
-        ingestion = ingest_operational_events_for_incident(incident_id)
-    except Exception as exc:
-        logger.exception("Auto-ingestion during incident creation failed for %s", incident_id)
-        ingestion = {
-            "status": "error",
-            "incident_id": incident_id,
-            "events_persisted": 0,
-            "message": f"Evidence ingestion failed: {type(exc).__name__}: {exc}",
-        }
 
-    try:
-        current_events = list_operational_events(incident_id)
-        evidence_summary = {
-            "status": ingestion.get("status", "unknown"),
-            "events_persisted": len(current_events),
-            "gcp_events_persisted": ingestion.get("events_persisted", 0),
-            "deployments_retrieved": ingestion.get("deployments_retrieved", 0),
-            "errors_retrieved": ingestion.get("errors_retrieved", 0),
-            "message": ingestion.get("message"),
-            "api_errors": ingestion.get("api_errors") or ingestion.get("errors"),
-        }
-        update_incident(incident_id, {"evidence_collection": evidence_summary})
+        ingest_operational_events_for_incident(incident_id)
     except Exception as exc:
-        logger.warning("Could not persist evidence summary for %s: %s", incident_id, exc)
-        evidence_summary = {"status": "partial", "message": "Incident created, but evidence summary could not be saved."}
+        logger.warning("Auto-ingestion during incident creation encountered: %s", exc)
 
     return {
         "incident_id": incident_id,
         "status": "open",
-        "ingestion": ingestion,
-        "evidence_collection": evidence_summary,
-        "attachments_received": len(request.attachments),
     }
 
 
@@ -590,34 +527,14 @@ async def investigate(request: InvestigateRequest) -> dict[str, Any]:
         _active_investigations.add(request.incident_id)
 
     try:
-        ingestion: dict[str, Any]
         try:
             from .ingestion import ingest_operational_events_for_incident
-            ingestion = ingest_operational_events_for_incident(request.incident_id)
-        except Exception as exc:
-            logger.exception("Auto-ingestion prior to investigation failed for %s", request.incident_id)
-            ingestion = {
-                "status": "error",
-                "events_persisted": 0,
-                "message": f"Evidence ingestion failed: {type(exc).__name__}: {exc}",
-            }
 
-        result = await run_investigation(request.incident_id, run_id=request.run_id)
-        try:
-            events = list_operational_events(request.incident_id)
-            result["evidence_summary"] = {
-                "events_available": len(events),
-                "ingestion_status": ingestion.get("status", "unknown"),
-                "gcp_events_persisted": ingestion.get("events_persisted", 0),
-                "deployments_retrieved": ingestion.get("deployments_retrieved", 0),
-                "errors_retrieved": ingestion.get("errors_retrieved", 0),
-                "message": ingestion.get("message"),
-                "api_errors": ingestion.get("api_errors") or ingestion.get("errors"),
-            }
+            ingest_operational_events_for_incident(request.incident_id)
         except Exception as exc:
-            logger.warning("Could not assemble evidence summary for %s: %s", request.incident_id, exc)
-            result["evidence_summary"] = {"ingestion_status": ingestion.get("status", "unknown")}
-        return result
+            logger.warning("Auto-ingestion prior to investigation encountered: %s", exc)
+
+        return await run_investigation(request.incident_id, run_id=request.run_id)
 
     except KeyError as exc:
         raise HTTPException(

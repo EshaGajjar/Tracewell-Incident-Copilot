@@ -56,51 +56,19 @@ export default function ReportForm({ onCreated }) {
     setError("");
 
     try {
-      setStage("Reading attached logs and saving incident evidence…");
-      if (files.length > 5) throw new Error("Attach no more than 5 files per incident.");
-      const attachments = await Promise.all(files.map(async (file) => {
-        const allowed = [".txt", ".log", ".json", ".csv"];
-        const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
-        if (!allowed.includes(extension)) {
-          throw new Error(`${file.name}: attach .txt, .log, .json, or .csv files. Image attachments are not yet analyzed.`);
-        }
-        if (file.size > 1024 * 1024) {
-          throw new Error(`${file.name}: each attachment must be 1 MB or smaller.`);
-        }
-        const content = await file.text();
-        if (content.length > 12000) {
-          throw new Error(`${file.name}: extracted text must be 12,000 characters or fewer.`);
-        }
-        return {
-          filename: file.name,
-          content_type: file.type || "text/plain",
-          content,
-        };
-      }));
-      const totalAttachmentChars = attachments.reduce((sum, file) => sum + file.content.length, 0);
-      if (totalAttachmentChars > 30000) {
-        throw new Error("Combined text attachments must contain 30,000 characters or fewer.");
-      }
       const created = await withTimeout(
         api("/incidents", {
           title: form.title.trim(),
           service: form.service.trim(),
           severity: form.severity,
           description: form.description.trim(),
-          attachments,
-        }, { timeoutMs: 45000 }),
+        }, { timeoutMs: 20000 }),
         22000,
         "Timed out while creating the incident. Check the backend server."
       );
       const incidentId = created.incident_id;
-      const evidence = created.evidence_collection;
-      if (evidence?.status === "error") {
-        setStage(`Incident saved. Evidence collection failed: ${evidence.message || "check backend logs"}`);
-      } else {
-        setStage(`Incident saved with ${evidence?.events_persisted ?? 0} evidence events. Opening incident…`);
-      }
 
-      onCreated(incidentId, { autoInvestigate: askCopilot, evidence });
+      onCreated(incidentId, { autoInvestigate: askCopilot });
     } catch (err) {
       setError(err?.message || "Could not create the incident.");
       setStage("");
@@ -179,11 +147,10 @@ export default function ReportForm({ onCreated }) {
         </div>
 
         <div className="form-group">
-          <label>Logs / Text Evidence (Optional)</label>
-          <p className="muted" style={{ marginTop: "-4px", fontSize: "12px" }}>Attach .txt, .log, .json, or .csv files (max 1 MB each). Text is passed into the investigation as evidence; screenshots are not analyzed yet.</p>
+          <label>Screenshots / Logs Attachment (Optional)</label>
           <input
             type="file"
-            accept=".txt,.log,.json,.csv,text/plain,application/json,text/csv"
+            accept="image/*"
             multiple
             disabled={Boolean(busyAction)}
             onChange={(e) => setFiles(Array.from(e.target.files || []))}

@@ -736,48 +736,6 @@ export default function IncidentDetail({
         </div>
       </div>
 
-      {inc.evidence_collection && (() => {
-        const collection = inc.evidence_collection;
-        const apiErrors = collection.api_errors || {};
-        const errorText = Object.values(apiErrors).map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" ");
-        const serviceNotFound = /NotFound: Cloud Run service|SERVICE.*does not exist|service .* not found/i.test(errorText);
-        const permissionDenied = /PermissionDenied|PERMISSION_DENIED|permission .* denied|Insufficient IAM/i.test(errorText);
-        const hasRealFailure = permissionDenied || (!serviceNotFound && Boolean(collection.status === "error" || collection.api_errors));
-        const noLiveEvidence = (collection.deployments_retrieved ?? 0) === 0 && (collection.errors_retrieved ?? 0) === 0;
-        return (
-          <div
-            className={`notice ${hasRealFailure ? "error-notice" : "info-notice"}`}
-            role="status"
-            style={{ margin: "12px 0", padding: "12px 14px" }}
-          >
-            <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
-              <DatabaseIcon size={16} />
-              <div>
-                <strong>Evidence collection</strong>
-                <div style={{ marginTop: "4px" }}>
-                  {collection.events_persisted ?? 0} evidence event(s) available at intake; {collection.deployments_retrieved ?? 0} deployment revision(s) and {collection.errors_retrieved ?? 0} log error(s) retrieved from GCP.
-                </div>
-                {serviceNotFound && (
-                  <div className="muted" style={{ marginTop: "4px" }}>No live Cloud Run service was found for this demo service. Tracewell will continue with the incident report, intake events, and any attached logs.</div>
-                )}
-                {!serviceNotFound && collection.message && (
-                  <div className="muted" style={{ marginTop: "4px" }}>{collection.message}</div>
-                )}
-                {hasRealFailure && (
-                  <details style={{ marginTop: "6px" }}>
-                    <summary style={{ cursor: "pointer" }}>Show evidence collection errors</summary>
-                    <pre style={{ whiteSpace: "pre-wrap", margin: "6px 0 0", fontSize: "12px" }}>{JSON.stringify(apiErrors, null, 2)}</pre>
-                  </details>
-                )}
-                {noLiveEvidence && !serviceNotFound && !permissionDenied && (
-                  <div className="muted" style={{ marginTop: "4px" }}>No matching live deployment revisions or log errors were found in the selected time window. Investigation can continue using available evidence.</div>
-                )}
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
       {/* ---------------- Polished Real-Time Investigation Progress UI ---------------- */}
       {(investigating || investigationError) && (
         <InvestigationProgress

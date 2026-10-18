@@ -631,9 +631,6 @@ const EvidenceOverviewDrawer = memo(function EvidenceOverviewDrawer({
 
 export default function CausalGraphView({ incidentId, incidentService }) {
   const [graphData, setGraphData] = useState(null);
-  // Keep the latest graph available to async refreshes without making loadGraph
-  // change identity on every graph update (which caused repeated reloads).
-  const graphDataRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshStageIndex, setRefreshStageIndex] = useState(0);
@@ -723,8 +720,8 @@ export default function CausalGraphView({ incidentId, incidentService }) {
 
           const incomingNodes = data?.nodes || [];
           const incomingEdges = data?.edges || [];
-          const prevNodes = graphDataRef.current?.nodes || [];
-          const prevEdges = graphDataRef.current?.edges || [];
+          const prevNodes = graphData?.nodes || [];
+          const prevEdges = graphData?.edges || [];
 
           const prevNodeMap = new Map(prevNodes.map((n) => [n.id, n]));
           const prevEdgeMap = new Map(
@@ -800,16 +797,12 @@ export default function CausalGraphView({ incidentId, incidentService }) {
             await new Promise((r) => setTimeout(r, 200 - elapsed));
           }
         } else {
-          // Set the leading hypothesis only when there is no valid current
-          // selection. Preserve a user's selection across graph re-fetches.
-          setSelectedNodeId((prevId) => {
-            const nodeStillExists = prevId && (data?.nodes || []).some((n) => n.id === prevId);
-            return nodeStillExists ? prevId : (data?.leading_hypothesis_id || null);
-          });
+          if (data?.leading_hypothesis_id) {
+            setSelectedNodeId(data.leading_hypothesis_id);
+          }
           setVisibleNodeLimit(INITIAL_BATCH_SIZE);
         }
 
-        graphDataRef.current = data;
         setGraphData(data);
       } catch (err) {
         if (currentSeq !== refreshSeqRef.current) return;
@@ -822,7 +815,7 @@ export default function CausalGraphView({ incidentId, incidentService }) {
         }
       }
     },
-    [incidentId, refreshing, clearStageTimers]
+    [incidentId, refreshing, graphData, clearStageTimers]
   );
 
   useEffect(() => {
