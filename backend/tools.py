@@ -12,7 +12,7 @@ import requests
 
 from .config import GCP_PROJECT, GCP_REGION, LOG_LOOKBACK_MINUTES
 from .retrieval import search_knowledge, search_past_incidents
-from .store import append_step, append_operational_event
+from .store import append_step, append_operational_event, list_operational_events
 
 
 def _safe_text(value: Any, limit: int = 7000) -> str:
@@ -95,6 +95,31 @@ def build_tools(incident_id: str, run_id: str | None = None) -> list[Callable]:
         except Exception:
             # Timeline persistence must not break read-only evidence collection.
             pass
+
+    def reporter_evidence_tool() -> dict:
+        """Read the original manual report and text attachments already stored for this incident."""
+        def run() -> dict:
+            events = list_operational_events(incident_id)
+            selected = [
+                event for event in events
+                if event.get("event_type") in {"user_report", "user_attachment"}
+            ]
+            return {
+                "incident_id": incident_id,
+                "count": len(selected),
+                "source": "reporter-provided evidence",
+                "events": [
+                    {
+                        "event_type": event.get("event_type"),
+                        "timestamp": event.get("timestamp"),
+                        "service": event.get("service"),
+                        "description": _safe_text(event.get("description", ""), 5000),
+                        "evidence": event.get("evidence", {}),
+                    }
+                    for event in selected[:8]
+                ],
+            }
+        return recorded("get_reporter_evidence", run, {})
 
     def knowledge_tool(query: str) -> dict:
         """Search internal runbooks and troubleshooting documentation."""
@@ -370,6 +395,7 @@ def build_tools(incident_id: str, run_id: str | None = None) -> list[Callable]:
 
     # Deliberately no rollback / set_traffic tool here.
     return [
+        reporter_evidence_tool,
         knowledge_tool,
         incident_tool,
         deployment_tool,

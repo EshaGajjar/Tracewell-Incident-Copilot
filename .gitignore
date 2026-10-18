@@ -15,3 +15,5 @@ backend/tracewell_local.sqlite3*
 *.backup_*
 # macOS system files
 .DS_Store
+.DS_Store
+backend/.DS_Store
